@@ -80,10 +80,10 @@ class Copy:
         return self.compose_file
 
     def _dc(self, *args: str, check: bool = True, capture: bool = True) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            ["docker", "compose", "-f", str(self.compose_file), *args],
-            check=check, capture_output=capture, text=True,
-        )
+        r = subprocess.run(["docker", "compose", "-f", str(self.compose_file), *args], capture_output=capture, text=True)
+        if check and r.returncode != 0:
+            raise RuntimeError(f"docker compose {args[0]} failed: {(r.stderr or r.stdout or '').strip()[-1500:]}")
+        return r
 
     def up(self, timeout: int = 180) -> None:
         self.write()

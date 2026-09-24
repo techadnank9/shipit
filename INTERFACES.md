@@ -26,6 +26,7 @@ Every builder codes against this file. Change it only by agreement.
 | `CCOPY_API_TOKEN` | unset | if set, API requires `Authorization: Bearer <token>` |
 | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET` | unset | GitHub App |
 | `SLACK_WEBHOOK_URL` | unset | Slack incoming webhook |
+| `CCOPY_MCP_ALLOW_APPROVE` | unset | `1` lets coding agents approve human gates over MCP (off by default) |
 | `LOCALSTACK_AUTH_TOKEN`, `CCOPY_AWS_IMAGE` | unset / `localstack/localstack:4.14` | fake AWS inside copies |
 
 ## Core engine API (Python, owned by core)

@@ -49,9 +49,64 @@ def check(repo: Path = typer.Argument(Path("."))):
 def run(request: str, repo: Path = typer.Option(Path("."), "--repo", "-r"), yes: bool = typer.Option(False, "--yes", "-y", help="auto-approve both gates"),
         open_report: bool = typer.Option(True, "--open/--no-open")):
     """Full loop: map → copy → requirements → AI test → agent → gates → proof report."""
-    out = pipeline.run(repo, request, auto_approve=yes)
-    if open_report and sys.platform == "darwin":
-        subprocess.run(["open", str(out)])
+    def emit(event, data):
+        if event == "status":
+            con.rule(data["status"].replace("_", " "))
+        elif event == "log":
+            con.print(f"  {data['message']}")
+        elif event == "tool":
+            con.print(f"  [dim]agent →[/] {data['tool']} {data['target']}")
+        elif event == "round":
+            con.print(f"  [bold]round {data['round']}[/] " + " ".join(("[green]✔" if c["passed"] else "[red]✖") + f"[/] {c['name']}" for c in data["checks"]))
+        elif event == "browser":
+            con.print(f"  AI test {'[green]PASS' if data['passed'] else '[red]FAIL'}[/] {data['test']}")
+
+    def gate(question: str) -> bool:
+        return yes or con.input(f"[bold yellow]GATE[/] {question} [y/N] ").strip().lower() in ("y", "yes")
+
+    r = pipeline.ChangeRun.create(repo, request, repo.resolve() / ".ccopy" / "runs", emit)
+    r.prepare()
+    if r.status == pipeline.RunStatus.AWAITING_REQUIREMENTS:
+        reqs = r.state["requirements"]
+        con.print(f"[bold]{reqs['title']}[/] · risk {reqs['risk']}")
+        for a in reqs["acceptance_criteria"]:
+            con.print(f"  • {a}")
+        for b in reqs["browser_tests"]:
+            con.print(f"  [cyan]AI test[/] {b['name']}: {b['instructions']}")
+        for d in reqs["db_invariants"]:
+            con.print(f"  [cyan]DB check[/] {d['description']} → {d['expect']}")
+        if gate("Approve these requirements?"):
+            r.approve_requirements("cli")
+            r.execute()
+        else:
+            r.reject("cli")
+    if r.status == pipeline.RunStatus.AWAITING_SHIP and gate("All gates passed. Approve this change to ship?"):
+        r.approve_ship("cli")
+    color = {"shipped": "green", "awaiting_ship": "yellow"}.get(r.status, "red")
+    con.print(f"[bold {color}]{r.status.upper()}[/] · report {r.dir / 'report.html'}")
+    if r.state.get("error"):
+        con.print(f"[red]{r.state['error']}[/]  (details: {r.dir / 'error.log'})")
+    if open_report and sys.platform == "darwin" and (r.dir / "report.html").exists():
+        subprocess.run(["open", str(r.dir / "report.html")])
+
+
+@app.command()
+def ci(api: str = typer.Option(..., "--api", help="Carbon Copy server, e.g. https://ccopy.example.com"),
+       project: str = typer.Option(..., "--project", help="project id (p_…)"),
+       token: str = typer.Option(None, "--token", envvar="CCOPY_API_TOKEN"),
+       output: Path = typer.Option(Path("result.json"), "--output"),
+       timeout: int = typer.Option(1800, "--timeout", help="seconds to wait for the run")):
+    """Run the project's saved tests on a fresh copy (for CI); exit 0 only if they pass."""
+    from .integrations.ci import run_ci
+    raise typer.Exit(run_ci(api, project, token, output, timeout))
+
+
+@app.command()
+def serve(host: str = typer.Option("127.0.0.1", "--host"), port: int = typer.Option(8080, "--port"), reload: bool = typer.Option(False, "--reload")):
+    """Run the API server and dashboard."""
+    import uvicorn
+
+    uvicorn.run("carboncopy.server.app:app", host=host, port=port, reload=reload)
 
 
 if __name__ == "__main__":
