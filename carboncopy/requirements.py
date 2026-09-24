@@ -1,7 +1,8 @@
 """Requirements writer: plain-English request + system map -> structured, testable requirements."""
 import json
 
-from .llm import ask_json
+from . import standin
+from .llm import ai_mode, ask_json
 
 SCHEMA = {
     "type": "object",
@@ -48,6 +49,8 @@ Rules:
 
 
 def write(request: str, system_map: dict, policy_violations: list[str], sources: dict[str, str]) -> dict:
+    if ai_mode() == "standin":
+        return standin.requirements(request, system_map)
     prompt = f"""REQUEST:
 {request}
 

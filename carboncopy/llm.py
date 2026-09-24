@@ -13,6 +13,11 @@ from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, ResultMessage
 MODEL = os.environ.get("CCOPY_MODEL", "claude-sonnet-5")
 
 
+def ai_mode() -> str:
+    """`standin` (scripted, default until Claude is connected) or `claude`."""
+    return os.environ.get("CCOPY_AI", "standin").lower()
+
+
 def ask_json(prompt: str, schema: dict[str, Any], system: str, budget_usd: float = 1.0) -> dict:
     """Single model call that must return JSON matching `schema`."""
 

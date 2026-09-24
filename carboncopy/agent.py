@@ -17,7 +17,8 @@ from claude_agent_sdk import (
 
 from . import checks
 from .copier import Copy
-from .llm import MODEL
+from . import standin
+from .llm import MODEL, ai_mode
 
 SYSTEM = """You are the coding agent inside Carbon Copy. You work in a copy of the customer's repository.
 You cannot run shell commands. To execute code you call run_checks, which rebuilds a working copy of the
@@ -31,20 +32,31 @@ Process:
 Stop when run_checks passes. Finish with a 3-5 line summary of what you changed and why."""
 
 
+def _round(workspace: Path, copy: Copy, n: int) -> dict:
+    copy.rebuild_app()
+    results = checks.run_all(copy, workspace)
+    return {"round": n, "passed": all(c.passed for c in results), "checks": checks.as_dicts(results)}
+
+
 def run(workspace: Path, copy: Copy, reqs: dict, on_event=None, max_rounds: int = 5, budget_usd: float = 4.0) -> dict:
     rounds: list[dict] = []
+    if ai_mode() == "standin":
+        def scripted_round():
+            rounds.append(_round(workspace, copy, len(rounds) + 1))
+            if on_event:
+                on_event("round", rounds[-1])
+            return rounds[-1]
+        return standin.agent_run(workspace, copy.map, scripted_round, on_event)
 
     @tool("run_checks", "Rebuild the carbon copy with the current code and run all gate checks", {})
     async def run_checks(_args):
         if len(rounds) >= max_rounds:
             return {"content": [{"type": "text", "text": "Round limit reached. Stop and summarize."}]}
-        await asyncio.to_thread(copy.rebuild_app)
-        results = await asyncio.to_thread(checks.run_all, copy, workspace)
-        passed = all(c.passed for c in results)
-        rounds.append({"round": len(rounds) + 1, "passed": passed, "checks": checks.as_dicts(results)})
+        rounds.append(await asyncio.to_thread(_round, workspace, copy, len(rounds) + 1))
+        passed = rounds[-1]["passed"]
         if on_event:
             on_event("round", rounds[-1])
-        report = "\n".join(f"[{'PASS' if c.passed else 'FAIL'}] {c.name}: {c.summary}\n  " + "\n  ".join(c.details[-12:]) for c in results)
+        report = "\n".join(f"[{'PASS' if c['passed'] else 'FAIL'}] {c['name']}: {c['summary']}\n  " + "\n  ".join(c['details'][-12:]) for c in rounds[-1]["checks"])
         return {"content": [{"type": "text", "text": ("ALL CHECKS PASSED\n" if passed else "CHECKS FAILED\n") + report}]}
 
     server = create_sdk_mcp_server("copy", tools=[run_checks])

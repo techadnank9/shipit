@@ -9,7 +9,8 @@ import psycopg
 from playwright.sync_api import Page, sync_playwright
 
 from .copier import DB_URL_HOST
-from .llm import ask_json
+from . import standin
+from .llm import ai_mode, ask_json
 
 STEP = {
     "type": "object",
@@ -31,6 +32,8 @@ page HTML you are given. Always start with goto "/". After each important action
 
 
 def plan(instructions: str, page_html: str) -> list[dict]:
+    if ai_mode() == "standin":
+        return standin.browser_plan(instructions)
     return ask_json(f"INSTRUCTION:\n{instructions}\n\nPAGE HTML:\n{page_html[:12000]}", PLAN, SYSTEM, budget_usd=0.5)["steps"]
 
 
@@ -70,7 +73,7 @@ def db_check(inv: dict) -> dict:
         return {"description": inv["description"], "sql": inv["sql"], "expect": inv["expect"], "got": f"error: {e}", "passed": False}
 
 
-def run(base_url: str, tests: list[dict], invariants: list[dict], out_dir: Path) -> dict:
+def run(base_url: str, tests: list[dict], invariants: list[dict], out_dir: Path, on_event=None) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     results = []
     with sync_playwright() as pw:
@@ -80,8 +83,14 @@ def run(base_url: str, tests: list[dict], invariants: list[dict], out_dir: Path)
             page = ctx.new_page()
             page.goto(base_url + "/")
             page.wait_for_load_state("networkidle")
-            steps = plan(test["instructions"], page.content())
             record = {"name": test["name"], "instructions": test["instructions"], "steps": [], "passed": True}
+            try:
+                steps = plan(test["instructions"], page.content())
+            except Exception as e:  # noqa: BLE001 - an unreadable test fails, the run continues
+                steps = []
+                record["passed"] = False
+                record["steps"].append({"kind": "ACT", "action": "plan", "target": "", "value": "", "why": "", "ok": False,
+                                        "error": str(e)[:400], "ms": 0, "screenshot": base64.b64encode(page.screenshot()).decode()})
             for i, s in enumerate(steps):
                 t0 = time.time()
                 err = None
@@ -99,6 +108,8 @@ def run(base_url: str, tests: list[dict], invariants: list[dict], out_dir: Path)
             ctx.close()
             record["video"] = str(video) if video else None
             results.append(record)
+            if on_event:
+                on_event("browser", {"test": record["name"], "passed": record["passed"]})
         browser.close()
     db = [db_check(i) for i in invariants]
     return {"tests": results, "db_checks": db, "passed": all(r["passed"] for r in results) and all(d["passed"] for d in db)}

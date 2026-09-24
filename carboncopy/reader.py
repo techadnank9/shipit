@@ -12,7 +12,7 @@ SKIP = {".git", ".venv", "node_modules", "__pycache__", ".ccopy"}
 
 def _files(root: Path, suffix: str):
     for p in root.rglob(f"*{suffix}"):
-        if not SKIP.intersection(p.parts):
+        if not SKIP.intersection(p.relative_to(root).parts):
             yield p
 
 

@@ -46,7 +46,7 @@ def policy(workspace: Path) -> Check:
 
 
 def checkov(workspace: Path) -> Check:
-    tf_dirs = sorted({p.parent for p in workspace.rglob("*.tf") if ".ccopy" not in p.parts})
+    tf_dirs = sorted({p.parent for p in workspace.rglob("*.tf") if ".ccopy" not in p.relative_to(workspace).parts})
     if not tf_dirs:
         return Check("IaC scan (Checkov)", True, "no Terraform found")
     findings = []
@@ -66,7 +66,7 @@ def checkov(workspace: Path) -> Check:
 def secrets(workspace: Path) -> Check:
     hits = []
     for p in workspace.rglob("*"):
-        if p.is_file() and not {".git", ".ccopy", ".venv", "node_modules"} & set(p.parts) and p.stat().st_size < 500_000:
+        if p.is_file() and not {".git", ".ccopy", ".venv", "node_modules"} & set(p.relative_to(workspace).parts) and p.stat().st_size < 500_000:
             try:
                 text = p.read_text()
             except (UnicodeDecodeError, OSError):
