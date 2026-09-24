@@ -3,3 +3,7 @@ __pycache__/
 .ccopy/
 *.pyc
 .env
+web/node_modules/
+web/.next/
+web/out/
+.ccopy-server/
