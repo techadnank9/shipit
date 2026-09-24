@@ -1,0 +1,26 @@
+[project]
+name = "carboncopy"
+version = "0.1.0"
+description = "Test every AI change on a working copy of production before it ships"
+requires-python = ">=3.12"
+dependencies = [
+  "typer>=0.19",
+  "rich>=14",
+  "pydantic>=2.11",
+  "python-hcl2>=7.3",
+  "tree-sitter>=0.25",
+  "tree-sitter-python>=0.25",
+  "pyyaml>=6",
+  "httpx>=0.28",
+  "psycopg[binary]>=3.2",
+  "playwright>=1.55",
+  "claude-agent-sdk>=0.1",
+  "jinja2>=3.1",
+]
+
+[project.scripts]
+ccopy = "carboncopy.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
