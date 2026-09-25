@@ -1,0 +1,82 @@
+#!/bin/bash
+# Carbon Copy worker boot script (rendered by Terraform, runs once via cloud-init).
+# The AMI (packer/worker.pkr.hcl) already has docker, compose, gVisor, the CloudWatch agent
+# and the copy base images. This script only wires config and starts the worker service.
+set -euo pipefail
+
+install -d -m 0755 /etc/ccopy
+install -d -m 0750 -o 10001 -g docker ${data_dir}
+
+# ---- non-secret app settings (secrets are fetched by docker/bootstrap.py at start) ----
+umask 077
+cat > /etc/ccopy/worker.env <<'ENV'
+%{ for k, v in env ~}
+${k}=${v}
+%{ endfor ~}
+ENV
+umask 022
+
+# ---- CloudWatch agent: memory + disk, which EC2 does not report by itself ----
+cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<'CWA'
+{
+  "agent": { "metrics_collection_interval": 60 },
+  "metrics": {
+    "namespace": "CarbonCopy/Worker",
+    "append_dimensions": { "AutoScalingGroupName": "$${aws:AutoScalingGroupName}" },
+    "aggregation_dimensions": [["AutoScalingGroupName"]],
+    "metrics_collected": {
+      "mem":  { "measurement": ["mem_used_percent"] },
+      "disk": { "measurement": ["used_percent"], "resources": ["/"] }
+    }
+  }
+}
+CWA
+/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s \
+  -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json || true
+
+# ---- worker service ----
+cat > /usr/local/bin/ccopy-worker-start <<'START'
+#!/bin/bash
+set -euo pipefail
+aws ecr get-login-password --region ${region} | docker login --username AWS --password-stdin ${registry}
+docker pull ${image}
+DOCKER_GID="$(getent group docker | cut -d: -f3)"
+# --network host: copies publish on 127.0.0.1:18000/15432/18025 and the worker (Playwright,
+#   pytest, health checks) reaches them there. Also keeps IMDS reachable at hop limit 1 for the
+#   worker only; copy containers on bridge networks cannot reach instance credentials.
+# ${data_dir} is mounted at the same path so compose bind mounts resolve on the host daemon.
+exec docker run --rm --name ccopy-worker \
+  --network host \
+  --group-add "$DOCKER_GID" \
+  --env-file /etc/ccopy/worker.env \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v ${data_dir}:${data_dir} \
+  --log-driver awslogs \
+  --log-opt awslogs-region=${region} \
+  --log-opt awslogs-group=${log_group} \
+  --log-opt awslogs-stream="$(cat /sys/devices/virtual/dmi/id/board_asset_tag 2>/dev/null || hostname)" \
+  ${image}
+START
+chmod 0755 /usr/local/bin/ccopy-worker-start
+
+cat > /etc/systemd/system/ccopy-worker.service <<'UNIT'
+[Unit]
+Description=Carbon Copy worker
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/ccopy-worker-start
+ExecStop=/usr/bin/docker stop --time 60 ccopy-worker
+Restart=always
+RestartSec=10
+TimeoutStopSec=90
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now docker
+systemctl enable --now ccopy-worker

@@ -1,0 +1,133 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Third-party actions are pinned to commit SHAs (tag in the trailing comment).
+env:
+  TF_VERSION: 1.16.4
+  CHECKOV_VERSION: 3.3.19
+
+jobs:
+  python:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+      - name: uv sync
+        run: uv sync --frozen
+      - name: ruff (only if configured)
+        run: |
+          if grep -q '^\[tool\.ruff' pyproject.toml 2>/dev/null || [ -f ruff.toml ] || [ -f .ruff.toml ]; then
+            uvx ruff check . && uvx ruff format --check .
+          else
+            echo "ruff not configured; skipping"
+          fi
+      - name: import check
+        run: |
+          uv run python - <<'PY'
+          import importlib, pathlib
+          mods = ["carboncopy", "carboncopy.pipeline", "carboncopy.copier", "carboncopy.checks"]
+          if pathlib.Path("carboncopy/server/app.py").exists():
+              mods += ["carboncopy.server.app"]
+          if pathlib.Path("carboncopy/server/worker.py").exists():
+              mods += ["carboncopy.server.worker"]
+          for m in mods:
+              importlib.import_module(m)
+              print("ok", m)
+          PY
+      - name: bootstrap entrypoint compiles
+        run: uv run python -m py_compile docker/bootstrap.py
+
+  web:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: has
+        run: echo "web=$([ -f web/package.json ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - if: steps.has.outputs.web == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - if: steps.has.outputs.web == 'true'
+        working-directory: web
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+          npm run build
+          test -f out/index.html
+      - if: steps.has.outputs.web != 'true'
+        run: echo "web/ not present yet; skipping"
+
+  terraform:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        layer: [01-network, 02-security, 03-storage, 04-database, 05-queue, 06-api, 07-workers, 08-web, 09-observability]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      - name: fmt
+        run: terraform fmt -recursive -check infra
+      - name: validate
+        working-directory: infra/${{ matrix.layer }}
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+
+  checkov:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - name: checkov (infra + Dockerfiles)
+        run: |
+          uvx --from "checkov==${CHECKOV_VERSION}" checkov -d infra --quiet --compact
+          uvx --from "checkov==${CHECKOV_VERSION}" checkov --framework dockerfile -f docker/api.Dockerfile -f docker/worker.Dockerfile --quiet --compact
+
+  images:
+    # Native arm64 runners (no QEMU). If unavailable for this repo, use ubuntu-24.04 + docker/setup-qemu-action.
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [api, worker]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: build ${{ matrix.image }} (linux/arm64)
+        run: |
+          docker buildx build --platform linux/arm64 \
+            -f docker/${{ matrix.image }}.Dockerfile \
+            --cache-from type=gha,scope=${{ matrix.image }} \
+            --cache-to type=gha,mode=max,scope=${{ matrix.image }} \
+            --load -t ccopy-${{ matrix.image }}:ci .
+      - name: trivy scan (HIGH/CRITICAL with a fix available)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ccopy-${{ matrix.image }}:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+      - name: smoke (api only)
+        if: matrix.image == 'api' && hashFiles('carboncopy/server/app.py') != ''
+        run: |
+          docker run -d --name api -p 8080:8080 ccopy-api:ci
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8080/api/health && exit 0; sleep 2; done
+          docker logs api; exit 1

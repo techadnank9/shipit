@@ -1,0 +1,22 @@
+# Build context for docker/api.Dockerfile and docker/worker.Dockerfile (context = repo root).
+.git
+.github
+.venv
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.ruff_cache
+.env
+**/.env
+.ccopy
+**/.ccopy
+.ccopy-server
+infra
+packer
+docs
+**/.terraform
+**/*.tfstate*
+web/node_modules
+web/.next
+web/out
+*.log

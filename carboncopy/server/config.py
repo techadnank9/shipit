@@ -23,7 +23,7 @@ def repos_dir() -> Path:
 
 
 def database_url() -> str:
-    return os.environ.get("DATABASE_URL", "sqlite:///./.ccopy-server/ccopy.db")
+    return os.environ.get("DATABASE_URL") or f"sqlite:///{data_dir() / 'ccopy.db'}"
 
 
 def ai_mode() -> str:
