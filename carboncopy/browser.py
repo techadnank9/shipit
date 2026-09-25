@@ -4,6 +4,7 @@ import base64
 import json
 import time
 from pathlib import Path
+from typing import Any
 
 import psycopg
 from playwright.sync_api import Page, sync_playwright
@@ -19,7 +20,7 @@ STEP = {
     "properties": {
         "kind": {"type": "string", "enum": ["ACT", "ASSERT"]},
         "action": {"type": "string", "enum": ["goto", "click", "double_click", "fill", "expect_text", "expect_no_text", "wait"]},
-        "target": {"type": "string", "description": "URL path for goto; visible button text or input label otherwise"},
+        "target": {"type": "string", "description": "URL path for goto; visible button text or input label for click/fill; for expect_text/expect_no_text the id, data-testid or aria-label of the element to look inside, or empty for the whole page"},
         "value": {"type": "string", "description": "text to type, or text expected on screen, or seconds to wait"},
         "why": {"type": "string"},
     },
@@ -35,6 +36,16 @@ def plan(instructions: str, page_html: str) -> list[dict]:
     if ai_mode() == "standin":
         return standin.browser_plan(instructions)
     return ask_json(f"INSTRUCTION:\n{instructions}\n\nPAGE HTML:\n{page_html[:12000]}", PLAN, SYSTEM, budget_usd=0.5)["steps"]
+
+
+def _scope(page: Page, target: str) -> Any:
+    """The element an expect_* step looks inside: by id, data-testid or aria-label; else the page."""
+    t = target.strip().lstrip("#")
+    if t:
+        for loc in (page.locator(f"[id={json.dumps(t)}]"), page.get_by_test_id(t), page.get_by_label(t, exact=True)):
+            if loc.count() > 0:
+                return loc.first
+    return page
 
 
 def _do(page: Page, base: str, s: dict) -> None:
@@ -54,11 +65,11 @@ def _do(page: Page, base: str, s: dict) -> None:
             loc = page.get_by_placeholder(t)
         loc.first.fill(v, timeout=5000)
     elif a == "expect_text":
-        page.get_by_text(v, exact=False).first.wait_for(state="visible", timeout=5000)
+        _scope(page, t).get_by_text(v, exact=False).first.wait_for(state="visible", timeout=5000)
     elif a == "expect_no_text":
         page.wait_for_timeout(500)
-        if page.get_by_text(v, exact=False).count() > 0:
-            raise AssertionError(f"'{v}' is on the screen but should not be")
+        if _scope(page, t).get_by_text(v, exact=False).count() > 0:
+            raise AssertionError(f"'{v}' is on the screen{f' in {t}' if t else ''} but should not be")
     elif a == "wait":
         page.wait_for_timeout(int(float(v or 1) * 1000))
 

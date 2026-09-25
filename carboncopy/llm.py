@@ -4,6 +4,7 @@ Locally this uses the logged-in Claude Code CLI. On AWS set CLAUDE_CODE_USE_BEDR
 AWS_REGION=us-west-1 and the same code calls Claude through Amazon Bedrock.
 """
 import asyncio
+import concurrent.futures
 import json
 import os
 from typing import Any
@@ -42,7 +43,17 @@ def ask_json(prompt: str, schema: dict[str, Any], system: str, budget_usd: float
             return structured
         return _extract_json(text)
 
-    return asyncio.run(run())
+    return _run_sync(run())
+
+
+def _run_sync(coro: Any) -> Any:
+    """asyncio.run, also from threads that already run a loop (Playwright's sync API does)."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
 
 
 def _extract_json(text: str) -> dict:
