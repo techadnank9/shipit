@@ -35,7 +35,10 @@ You will see each new page when you get there, so plan steps only as far as the 
 know the labels; stop after the step that leads to a new page. After each important action add an
 ASSERT step. Text checks are case-sensitive; expect_no_text matches whole words only. An expect_no_text must name text that
 would appear only if the behaviour were wrong (an error message, the text you just tried to send), never
-text that is always on the page such as names, headings or navigation."""
+text that is always on the page such as names, headings or navigation. expect_text checks text a person can read on screen: button names that come only from aria-labels
+(icon buttons such as "Zoom in") are not visible text, so check a visible result of using them instead.
+Browser-native form validation
+(required fields, type=email) shows no text on the page: check instead that the page did not move on."""
 
 JS_DIGEST = """() => {
   const vis = e => e.offsetParent !== null || e.getClientRects().length > 0;
@@ -97,6 +100,14 @@ def _text(v: str, whole_word: bool = False) -> re.Pattern:
     return re.compile(rf"(?<!\w){re.escape(v)}(?!\w)" if whole_word else re.escape(v))
 
 
+def _rendered(page: Page, target: str) -> str:
+    scope = _scope(page, target)
+    try:
+        return (scope.locator("body") if scope is page else scope).inner_text(timeout=2000)
+    except Exception:  # noqa: BLE001 - page mid-navigation: nothing readable yet
+        return ""
+
+
 def _do(page: Page, base: str, s: dict) -> None:
     a, t, v = s["action"], s["target"], _expand(s["value"])
     if a == "goto":
@@ -114,10 +125,16 @@ def _do(page: Page, base: str, s: dict) -> None:
             loc = page.get_by_placeholder(t)
         loc.first.fill(v, timeout=5000)
     elif a == "expect_text":
-        _scope(page, t).get_by_text(_text(v)).first.wait_for(state="visible", timeout=5000)
+        # Rendered text (what a person reads, after CSS such as text-transform), polled for up to 5s.
+        rx = _text(v)
+        deadline = time.time() + 5
+        while not rx.search(_rendered(page, t)):
+            if time.time() > deadline:
+                raise AssertionError(f"'{v}' is not on the screen{f' in {t}' if t else ''}")
+            page.wait_for_timeout(250)
     elif a == "expect_no_text":
         page.wait_for_timeout(500)
-        if any(el.is_visible() for el in _scope(page, t).get_by_text(_text(v, whole_word=True)).all()):
+        if _text(v, whole_word=True).search(_rendered(page, t)):
             raise AssertionError(f"'{v}' is on the screen{f' in {t}' if t else ''} but should not be")
     elif a == "wait":
         page.wait_for_timeout(int(float(v or 1) * 1000))

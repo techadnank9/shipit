@@ -63,7 +63,9 @@ or engineer would care about: errors in the console or failed requests, raw erro
 "NaN" or "null" on screen, broken or empty sections that should have content, controls that cannot work,
 and visual defects you can see in the screenshot (text cut off or overflowing its box, overlapping
 elements, broken images, unreadable contrast).
-Do not report style opinions. Then write up to 3 plain-English tests of the main things a user does on
+The copy runs on a small, randomly generated seed dataset, so do not report sparse lists, low counts,
+odd names or implausible coordinates that come from the data itself; report how the page presents data
+(formatting, wrong units, broken layout), not the data. Do not report style opinions. Then write up to 3 plain-English tests of the main things a user does on
 this page. Each test starts with "Open <path>.", describes the actions with visible labels, and ends with
 "Expected: ..." naming what must be visible. Each test runs alone in a fresh browser (no cookies or local
 storage): if the page needs a signed-in user, the test signs up or signs in through the UI first. The tester
