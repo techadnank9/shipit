@@ -29,15 +29,50 @@ STEP = {
 PLAN = {"type": "object", "additionalProperties": False, "required": ["steps"], "properties": {"steps": {"type": "array", "items": STEP}}}
 
 SYSTEM = """You turn a plain-English QA instruction into browser steps for Playwright.
-Use only the actions in the schema. Targets must match visible button text or input aria-labels in the
-page HTML you are given. Always start with goto to the page the instruction names ("/" if it names none).
-After each important action add an ASSERT step. Text checks are case-sensitive and match whole words."""
+Use only the actions in the schema. Targets must match a button text, input label or placeholder listed in
+the CURRENT PAGE you are given. Start with goto to the page the instruction names ("/" if it names none).
+You will see each new page when you get there, so plan steps only as far as the current page lets you
+know the labels; stop after the step that leads to a new page. After each important action add an
+ASSERT step. Text checks are case-sensitive; expect_no_text matches whole words only. An expect_no_text must name text that
+would appear only if the behaviour were wrong (an error message, the text you just tried to send), never
+text that is always on the page such as names, headings or navigation."""
+
+JS_DIGEST = """() => {
+  const vis = e => e.offsetParent !== null || e.getClientRects().length > 0;
+  const name = e => (e.getAttribute('aria-label') || (e.labels && e.labels[0] && e.labels[0].innerText) ||
+    e.getAttribute('placeholder') || e.innerText || e.value || e.name || '').trim().replace(/\\s+/g, ' ').slice(0, 80);
+  const q = s => Array.from(document.querySelectorAll(s)).filter(vis);
+  return {
+    buttons: q('button, [role=button], input[type=submit], input[type=button]').map(e => name(e) + (e.disabled ? ' [disabled]' : '')).filter(Boolean).slice(0, 60),
+    inputs: q('input:not([type=hidden]):not([type=submit]):not([type=button]), textarea, select').map(e =>
+      `${e.tagName.toLowerCase()}${e.type ? '/' + e.type : ''} label="${name(e)}" placeholder="${e.getAttribute('placeholder') || ''}"`).slice(0, 60),
+    links: q('a[href]').map(a => `${(a.innerText || '').trim().slice(0, 40)} -> ${a.getAttribute('href')}`).slice(0, 80),
+  };
+}"""
 
 
-def plan(instructions: str, page_html: str) -> list[dict]:
+def digest(page: Page) -> str:
+    """What a tester sees: URL, visible text, and every control with the label a locator can use."""
+    try:
+        d = page.evaluate(JS_DIGEST)
+        text = page.inner_text("body")[:5000]
+    except Exception:  # noqa: BLE001
+        return f"URL: {page.url}\n(page not readable)"
+    return (f"URL: {page.url}\nBUTTONS: {d['buttons']}\nINPUTS: {d['inputs']}\nLINKS: {d['links']}\n"
+            f"VISIBLE TEXT:\n{text}")
+
+
+def plan(instructions: str, page_html: str, done: list[dict] | None = None, error: str | None = None) -> list[dict]:
+    """Steps from here. `done` and `error` turn this into a re-plan from the page the tester is on."""
     if ai_mode() == "standin":
-        return standin.browser_plan(instructions)
-    return ask_json(f"INSTRUCTION:\n{instructions}\n\nPAGE HTML:\n{page_html[:12000]}", PLAN, SYSTEM, budget_usd=0.5)["steps"]
+        return [] if done else standin.browser_plan(instructions)
+    prompt = f"INSTRUCTION:\n{instructions}\n\nCURRENT PAGE:\n{page_html}"
+    if done is not None:
+        prompt += ("\n\nSTEPS ALREADY DONE (do not repeat them):\n"
+                   + "\n".join(f"- {s['kind']} {s['action']} {s['target']!r} {s['value'][:60]!r} -> {'ok' if s['ok'] else s['error']}" for s in done)
+                   + (f"\n\nTHE LAST ACTION FAILED: {error}\nFind the right control on the current page." if error else "")
+                   + "\n\nReturn only the remaining steps (an empty list if the instruction is complete).")
+    return ask_json(prompt, PLAN, SYSTEM, budget_usd=0.5)["steps"]
 
 
 def _scope(page: Page, target: str) -> Any:
@@ -57,9 +92,9 @@ def _expand(v: str) -> str:
     return REPEAT.sub(lambda m: m[1] * int(m[2]), v)
 
 
-def _text(v: str) -> re.Pattern:
-    """Case-sensitive, whole-word: "Send" must not match "send a message" or "Sending"."""
-    return re.compile(rf"(?<!\w){re.escape(v)}(?!\w)")
+def _text(v: str, whole_word: bool = False) -> re.Pattern:
+    """Case-sensitive. Negative checks match whole words, so "Send" is not found in "send a message"."""
+    return re.compile(rf"(?<!\w){re.escape(v)}(?!\w)" if whole_word else re.escape(v))
 
 
 def _do(page: Page, base: str, s: dict) -> None:
@@ -82,7 +117,7 @@ def _do(page: Page, base: str, s: dict) -> None:
         _scope(page, t).get_by_text(_text(v)).first.wait_for(state="visible", timeout=5000)
     elif a == "expect_no_text":
         page.wait_for_timeout(500)
-        if any(el.is_visible() for el in _scope(page, t).get_by_text(_text(v)).all()):
+        if any(el.is_visible() for el in _scope(page, t).get_by_text(_text(v, whole_word=True)).all()):
             raise AssertionError(f"'{v}' is on the screen{f' in {t}' if t else ''} but should not be")
     elif a == "wait":
         page.wait_for_timeout(int(float(v or 1) * 1000))
@@ -106,6 +141,17 @@ def settle(page: Page, timeout: int = 15000) -> None:
         page.wait_for_load_state("load")
 
 
+MAX_REPLANS = 8
+
+
+def _replan(test: dict, page: Page, done: list[dict], error: str | None) -> list[dict]:
+    try:
+        settle(page, timeout=5000)
+        return plan(test["instructions"], digest(page), done=[d for d in done if d.get("action") != "plan"], error=error)
+    except Exception:  # noqa: BLE001 - no new plan: the loop ends and the record stands as is
+        return []
+
+
 def run_one(browser: Any, base_url: str, test: dict, video_dir: Path) -> dict:
     """Plan and run one plain-English test in a fresh browser context, a screenshot per step."""
     ctx = browser.new_context(record_video_dir=str(video_dir), viewport={"width": 1100, "height": 720})
@@ -114,13 +160,16 @@ def run_one(browser: Any, base_url: str, test: dict, video_dir: Path) -> dict:
     try:
         page.goto(base_url + test.get("start", "/"))
         settle(page)
-        steps = plan(test["instructions"], page.content())
+        steps = plan(test["instructions"], digest(page))
     except Exception as e:  # noqa: BLE001 - an unreadable test fails, the run continues
         steps = []
         record["passed"] = False
         record["steps"].append({"kind": "ACT", "action": "plan", "target": "", "value": "", "why": "", "ok": False,
                                 "error": f"{type(e).__name__}: {e}"[:400], "ms": 0, "screenshot": base64.b64encode(page.screenshot()).decode()})
-    for s in steps:
+    replans = 0
+    while steps:
+        s = steps.pop(0)
+        before = page.url
         t0 = time.time()
         err = None
         try:
@@ -128,11 +177,26 @@ def run_one(browser: Any, base_url: str, test: dict, video_dir: Path) -> dict:
         except Exception as e:  # noqa: BLE001
             err = (str(e).splitlines() or [type(e).__name__])[0][:300]
         shot = page.screenshot()
+        # A control that could not be found gets one fresh look at the page; a failed check never does.
+        if err and s["kind"] == "ACT" and replans < MAX_REPLANS:
+            replans += 1
+            record["steps"].append({**s, "ok": False, "error": err, "retried": True, "ms": int((time.time() - t0) * 1000),
+                                    "screenshot": base64.b64encode(shot).decode()})
+            steps = _replan(test, page, record["steps"], err)
+            continue
         record["steps"].append({**s, "ok": err is None, "error": err, "ms": int((time.time() - t0) * 1000),
                                 "screenshot": base64.b64encode(shot).decode()})
         if err:
             record["passed"] = False
             break
+        # Landed on a new page, or the plan ran out after an action: look at the page and plan onwards.
+        if s["kind"] == "ACT" and replans < MAX_REPLANS and (not steps or page.url != before):
+            replans += 1
+            steps = _replan(test, page, record["steps"], None)
+    if record["passed"] and not any(x["kind"] == "ASSERT" and x["ok"] for x in record["steps"]):
+        record["passed"] = False
+        record["steps"].append({"kind": "ASSERT", "action": "check", "target": "", "value": "", "why": "", "ok": False,
+                                "error": "the test never checked anything", "ms": 0, "screenshot": ""})
     video = page.video.path() if page.video else None
     ctx.close()
     record["video"] = str(video) if video else None

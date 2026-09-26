@@ -389,7 +389,7 @@ function PageCard({ page, pid }: { page: SweepPage; pid: string }) {
 function TestResult({ test, pid }: { test: SweepTest; pid: string }) {
   const [saved, setSaved] = useState(false);
   const [err, setErr] = useState<unknown>(null);
-  const failed = test.steps.find((s) => !s.ok);
+  const failed = test.steps.find((s) => !s.ok && !s.retried);
   return (
     <div className="ob-test">
       <div className="row-gap">

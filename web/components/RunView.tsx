@@ -512,7 +512,7 @@ function rowsFor(before: TestSuiteResult | null, after: TestSuiteResult | null):
         byName.set(k, r);
         rows.push(r);
       }
-      r[side] = { passed: t.passed, error: t.steps.find((s) => !s.ok)?.error ?? null };
+      r[side] = { passed: t.passed, error: t.steps.find((s) => !s.ok && !s.retried)?.error ?? null };
     });
     res?.db_checks.forEach((d) => {
       const k = "d:" + d.description;
@@ -807,7 +807,7 @@ function stepText(s: Step): string {
 }
 
 function TestEvidence({ t, onOpen }: { t: BrowserTestResult; onOpen: (s: { src: string; caption: string }) => void }) {
-  const failed = t.steps.find((s) => !s.ok);
+  const failed = t.steps.find((s) => !s.ok && !s.retried);
   return (
     <article className={`test ${t.passed ? "" : "test-fail"}`}>
       <header className="test-head">

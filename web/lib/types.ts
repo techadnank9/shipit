@@ -59,6 +59,7 @@ export interface Step {
   value: string;
   why: string;
   ok: boolean;
+  retried?: boolean;
   error: string | null;
   ms: number;
   screenshot?: string | null;
@@ -205,7 +206,7 @@ export type Onboarding = {
   approved_by: { who: string; at: number } | null;
 };
 export type SweepIssue = { severity: "high" | "medium" | "low"; title: string; detail: string };
-export type SweepStep = { kind: string; action: string; target: string; value: string; ok: boolean; error: string | null; screenshot: string };
+export type SweepStep = { kind: string; action: string; target: string; value: string; ok: boolean; retried?: boolean; error: string | null; screenshot: string };
 export type SweepTest = { name: string; instructions: string; passed: boolean; steps: SweepStep[] };
 export type SweepPage = {
   path: string;
