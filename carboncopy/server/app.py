@@ -288,11 +288,40 @@ def start_onboarding(pid: str) -> dict[str, Any]:
     _project(pid)
     store = get_store()
     current = onboarding.state(store, pid)["onboarding"]
-    if current["status"] in ("drafting", "booting", "revising"):
+    if current["status"] in ("queued", "drafting", "booting", "revising", "sweeping"):
         raise HTTPException(409, "onboarding is already running")
     store.set_project_meta(pid, "onboarding", {"status": "queued", "log": [], "attempts": []})
     enqueue("project.onboard", "", project_id=pid)
     return onboarding.state(store, pid)
+
+
+@app.post("/api/projects/{pid}/sweep")
+def start_sweep(pid: str) -> dict[str, Any]:
+    from . import onboarding
+    from .queue import enqueue
+
+    _project(pid)
+    store = get_store()
+    ob = onboarding.state(store, pid)["onboarding"]
+    if ob["status"] in ("queued", "drafting", "booting", "revising", "sweeping"):
+        raise HTTPException(409, "onboarding or a sweep is already running")
+    if not (store.get_project_meta(pid, "profile") or store.get_project_meta(pid, "profile_draft")):
+        raise HTTPException(409, "onboard the project first")
+    ob["status"] = "sweeping"
+    store.set_project_meta(pid, "onboarding", ob)
+    enqueue("project.sweep", "", project_id=pid)
+    return onboarding.state(store, pid)
+
+
+@app.get("/api/projects/{pid}/sweep")
+def get_sweep(pid: str) -> Any:
+    from . import onboarding
+
+    _project(pid)
+    f = onboarding.sweep_path(pid)
+    if not f.exists():
+        raise HTTPException(404, "no QA sweep yet")
+    return JSONResponse(json.loads(f.read_text()))
 
 
 @app.post("/api/projects/{pid}/profile/approve")
@@ -401,7 +430,7 @@ def _page(name: str) -> Path | None:
 def _mount_dashboard() -> None:
     if not WEB_OUT.is_dir():
         return
-    for name in ("project", "run"):
+    for name in ("project", "run", "onboard"):
         if page := _page(name):
             app.add_api_route(f"/{name}", lambda page=page: FileResponse(page), methods=["GET"], include_in_schema=False)
     app.mount("/", StaticFiles(directory=WEB_OUT, html=True), name="dashboard")

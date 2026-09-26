@@ -661,7 +661,7 @@ function AgentPanel({ st }: { st: Partial<RunState> }) {
   const a = st.agent;
   const rounds = st.rounds ?? [];
   return (
-    <Panel title="Coding agent" id="agent" sub="Claude edits code with no shell. Each round it can only run the gate checks on the copy.">
+    <Panel title="Coding agent" id="agent" sub="The agent edits code with no shell. Each round it can only run the gate checks on the copy.">
       {a && (
         <>
           <p>{a.summary}</p>

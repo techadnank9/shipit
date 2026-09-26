@@ -39,7 +39,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
             ) : health.ok ? (
               <span className="small conn" title="API reachable">
                 <span className="dot dot-pass" aria-hidden="true" />
-                <span className="conn-text">API · AI {health.ai === "claude" ? "Claude" : health.ai ?? "?"}</span>
+                <span className="conn-text">API · AI {health.ai === "standin" ? "demo mode" : "connected"}</span>
               </span>
             ) : (
               <span className="small conn" title="API unreachable">

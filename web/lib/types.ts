@@ -170,3 +170,55 @@ export type RunEvent =
   | { event: "round"; data: Round }
   | { event: "tool"; data: { tool: string; target: string } }
   | { event: "browser"; data: { test: string; passed: boolean } };
+
+// ---- onboarding + QA sweep ----
+export type SetupStep = { kind: "postgres" | "clickhouse" | "postgres_sql" | "run"; value: string; env: Record<string, string> };
+export type CopyProfile = {
+  build: "dockerfile" | "node";
+  start: string;
+  port: number;
+  health: string;
+  postgres_db: string;
+  services: string[];
+  env: Record<string, string>;
+  env_not_needed: Record<string, string>;
+  env_unavailable: Record<string, string>;
+  setup: SetupStep[];
+  tests: string;
+  notes: string;
+};
+export type OnboardingStatus = "not_started" | "queued" | "drafting" | "booting" | "revising" | "sweeping" | "ready" | "failed";
+export type OnboardingLog = { t: number; message: string; error?: string };
+export type SweepTotals = { pages: number; issues: { high: number; medium: number; low: number }; tests: number; tests_passed: number };
+export type Onboarding = {
+  onboarding: {
+    status: OnboardingStatus;
+    log: OnboardingLog[];
+    attempts: { attempt: number; ok: boolean; error?: string }[];
+    pages?: { path: string; status: number | string }[];
+    fidelity?: { score: number; missing_env: string[] };
+    sweep?: SweepTotals;
+    error?: string;
+  };
+  draft: CopyProfile | null;
+  profile: CopyProfile | null;
+  approved_by: { who: string; at: number } | null;
+};
+export type SweepIssue = { severity: "high" | "medium" | "low"; title: string; detail: string };
+export type SweepStep = { kind: string; action: string; target: string; value: string; ok: boolean; error: string | null; screenshot: string };
+export type SweepTest = { name: string; instructions: string; passed: boolean; steps: SweepStep[] };
+export type SweepPage = {
+  path: string;
+  final_path: string;
+  status: number | string;
+  ms: number;
+  console_errors: string[];
+  page_errors: string[];
+  failed_requests: string[];
+  screenshot: string;
+  summary: string;
+  issues: SweepIssue[];
+  tests: { name: string; instructions: string }[];
+  results: SweepTest[];
+};
+export type Sweep = { pages: SweepPage[]; unvisited_routes: string[]; totals: SweepTotals; finished_at: number };

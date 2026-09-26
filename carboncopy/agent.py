@@ -2,6 +2,7 @@
 run_checks tool, which rebuilds the carbon copy and runs the gate checks there."""
 import asyncio
 import json
+import os
 from pathlib import Path
 
 from claude_agent_sdk import (
@@ -31,6 +32,22 @@ Process:
 4. Fix every infrastructure policy violation in Terraform.
 5. Call run_checks. If anything fails, fix it and call run_checks again.
 Stop when run_checks passes. Finish with a 3-5 line summary of what you changed and why."""
+
+
+AGENT_TIMEOUT_S = float(os.environ.get("CCOPY_AGENT_TIMEOUT_S", "1800"))
+
+
+def _layout(system_map: dict) -> str:
+    pages = sorted({f"{r['path']} -> {r['file']}" for r in system_map["routes"] if r["method"] == "PAGE"})
+    api = sorted({f"{r['method']} {r['path']} -> {r['file']}" for r in system_map["routes"] if r["method"] != "PAGE"})
+    schema = [f"{f} ({k['engine']} {k['kind']})" for f, k in system_map.get("sql", {}).items()]
+    tests = sorted({c["file"] for c in system_map["code"] if "test" in c["file"].lower()})
+    return "\n".join([
+        "Pages: " + ("; ".join(pages) or "none detected"),
+        "API routes: " + ("; ".join(api[:60]) or "none detected"),
+        "SQL files: " + ("; ".join(schema) or "none"),
+        "Test files: " + ("; ".join(tests) or "none (the repo has no automated tests)"),
+    ])
 
 
 def _round(workspace: Path, copy: Copy, n: int) -> dict:
@@ -65,7 +82,8 @@ def run(workspace: Path, copy: Copy, reqs: dict, on_event=None, max_rounds: int 
 
 {json.dumps(reqs, indent=1)}
 
-The web page is served from app/main.py (PAGE). Tests live in tests/."""
+Where things are in this repo:
+{_layout(copy.map)}"""
 
     async def go() -> dict:
         options = ClaudeAgentOptions(
@@ -77,7 +95,7 @@ The web page is served from app/main.py (PAGE). Tests live in tests/."""
             disallowed_tools=["Bash", "WebFetch", "WebSearch"],
             mcp_servers={"copy": server},
             permission_mode="acceptEdits",
-            setting_sources=None,
+            setting_sources=[],  # never load the host's personal settings, plugins or hooks
             max_turns=60,
             max_budget_usd=budget_usd,
         )
@@ -97,4 +115,4 @@ The web page is served from app/main.py (PAGE). Tests live in tests/."""
                 cost = msg.total_cost_usd or 0.0
         return {"summary": summary, "cost_usd": cost, "rounds": rounds, "edited_files": sorted(set(edits))}
 
-    return asyncio.run(go())
+    return asyncio.run(asyncio.wait_for(go(), timeout=AGENT_TIMEOUT_S))

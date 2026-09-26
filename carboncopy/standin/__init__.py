@@ -20,7 +20,7 @@ def is_sample(system_map: dict) -> bool:
 
 def requirements(request: str, system_map: dict) -> dict:
     if not is_sample(system_map):
-        raise StandInUnavailable("Stand-in AI only knows the sample refunds app. Connect Claude (CCOPY_AI=claude) for other repos.")
+        raise StandInUnavailable("Stand-in AI only knows the sample refunds app. Connect the AI provider (CCOPY_AI=claude) for other repos.")
     return {
         "title": "Retry-safe refunds with a $500 cap",
         "summary": "Refunds must be idempotent per Idempotency-Key (a retry or double-click never creates a second refund), "
@@ -77,7 +77,7 @@ def browser_plan(instructions: str) -> list[dict]:
                 break
         else:
             raise StandInUnavailable(f"Stand-in AI can't read the step '{s}'. Use: Go to / · Type X into Label · Click Button · "
-                                     "Double-click Button · Expect to see Text · Expect not to see Text · Wait N. Or connect Claude.")
+                                     "Double-click Button · Expect to see Text · Expect not to see Text · Wait N. Or connect the AI provider.")
     if not steps or steps[0]["action"] != "goto":
         steps.insert(0, {"kind": "ACT", "action": "goto", "target": "/", "value": "", "why": "start at the home page"})
     return steps
@@ -86,7 +86,7 @@ def browser_plan(instructions: str) -> list[dict]:
 def agent_run(workspace: Path, system_map: dict, run_checks, on_event=None) -> dict:
     """Two rounds, like a real agent: fix the code first, then the Terraform the policy gate flags."""
     if not is_sample(system_map):
-        raise StandInUnavailable("Stand-in coding agent only knows the sample refunds app. Connect Claude.")
+        raise StandInUnavailable("Stand-in coding agent only knows the sample refunds app. Connect the AI provider.")
     rounds = []
 
     def put(rel: str):

@@ -207,3 +207,21 @@ def recover(store: Store) -> None:
     for row in store.runs_with_status(config.TERMINAL | config.AWAITING, exclude=True):
         log.warning("run %s was %s when the server stopped; marking failed", row["id"], row["status"])
         fail(store, row["id"], f"server restarted while run was {row['status']}")
+    for p in store.list_projects():
+        ob = store.get_project_meta(p["id"], "onboarding")
+        if ob and ob.get("status") in ("queued", "drafting", "booting", "revising", "sweeping"):
+            log.warning("project %s onboarding was %s when the server stopped; marking failed", p["id"], ob["status"])
+            ob["status"] = "failed"
+            ob["error"] = f"server restarted while onboarding was {ob['status']}"
+            store.set_project_meta(p["id"], "onboarding", ob)
+    _remove_orphan_copies()
+
+
+def _remove_orphan_copies() -> None:
+    """Copies whose run died with the server still hold ports and memory: take them down."""
+    import subprocess
+
+    r = subprocess.run(["docker", "ps", "-a", "--format", "{{.Label \"com.docker.compose.project\"}}"], capture_output=True, text=True)
+    for project in sorted({x for x in r.stdout.split() if x.startswith("ccopy-")}):
+        log.warning("removing orphaned copy %s", project)
+        subprocess.run(["docker", "compose", "-p", project, "down", "-v", "--remove-orphans"], capture_output=True)

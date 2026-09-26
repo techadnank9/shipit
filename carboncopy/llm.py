@@ -12,6 +12,7 @@ from typing import Any
 from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, ResultMessage, TextBlock, query
 
 MODEL = os.environ.get("CCOPY_MODEL", "claude-sonnet-5")
+ASK_TIMEOUT_S = float(os.environ.get("CCOPY_ASK_TIMEOUT_S", "180"))
 
 
 def ai_mode() -> str:
@@ -29,7 +30,7 @@ def ask_json(prompt: str, schema: dict[str, Any], system: str, budget_usd: float
             tools=[],
             max_turns=2,
             max_budget_usd=budget_usd,
-            setting_sources=None,
+            setting_sources=[],  # never load the host's personal settings, plugins or hooks
             output_format={"type": "json_schema", "schema": schema},
         )
         text, structured = "", None
@@ -43,7 +44,7 @@ def ask_json(prompt: str, schema: dict[str, Any], system: str, budget_usd: float
             return structured
         return _extract_json(text)
 
-    return _run_sync(run())
+    return _run_sync(asyncio.wait_for(run(), timeout=ASK_TIMEOUT_S))
 
 
 def _run_sync(coro: Any) -> Any:

@@ -6,6 +6,7 @@ log and the pages that answered, waits for approval. Runs use the approved profi
 """
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 import time
@@ -15,6 +16,7 @@ from typing import Any
 import httpx
 
 from carboncopy import profile as profiles
+from carboncopy import qa
 from carboncopy.copier import Copy
 from carboncopy.pipeline import snapshot
 from carboncopy.reader import scan
@@ -91,13 +93,66 @@ def run(store: Store, pid: str) -> None:
             ob["attempts"].append({"attempt": attempt, "ok": True})
             prof["baseline_sql"] = list(system_map["schema_files"])
             store.set_project_meta(pid, "profile_draft", prof)
-            ob |= {"status": "ready", "pages": pages, "fidelity": fid, "finished_at": time.time()}
+            ob |= {"pages": pages, "fidelity": fid}
             say(f"copy booted · fidelity {fid['score']}% · {sum(1 for p in pages if isinstance(p['status'], int) and p['status'] < 400)}/{len(pages)} pages answer")
+            ob["status"] = "sweeping"
+            say("QA sweep: going through every page")
+            ob["sweep"] = _sweep(store, pid, copy, say)
+            ob |= {"status": "ready", "finished_at": time.time()}
+            say("ready for approval")
             return
     except Exception as e:  # noqa: BLE001
         log.error("onboarding %s failed:\n%s", pid, traceback.format_exc())
         ob |= {"status": "failed", "error": str(e)[-3000:], "finished_at": time.time()}
         say(f"onboarding failed: {e}")
+    finally:
+        if copy:
+            copy.down()
+
+
+def sweep_path(pid: str):
+    return config.data_dir() / "onboarding" / pid / "sweep.json"
+
+
+def _sweep(store: Store, pid: str, copy: Copy, say) -> dict:
+    out = sweep_path(pid).parent / "sweep"
+    res = qa.sweep(copy.app_url, copy.map["routes"], out,
+                   on_event=lambda _k, d: say(f"page {d['path']}: {d['issues']} issue(s), tests {sum(d['tests'])}/{len(d['tests'])} passed"))
+    res["finished_at"] = time.time()
+    sweep_path(pid).write_text(json.dumps(res))
+    t = res["totals"]
+    say(f"QA sweep: {t['pages']} pages, {t['issues']['high']} high / {t['issues']['medium']} medium / {t['issues']['low']} low issues, "
+        f"{t['tests_passed']}/{t['tests']} generated tests passed")
+    return t
+
+
+def sweep_project(store: Store, pid: str) -> None:
+    """On demand: boot a copy from the approved (or draft) profile and sweep every page."""
+    ob = store.get_project_meta(pid, "onboarding") or {"log": [], "attempts": []}
+
+    def say(msg: str, **extra: Any) -> None:
+        ob.setdefault("log", []).append({"t": time.time(), "message": msg, **extra})
+        store.set_project_meta(pid, "onboarding", ob)
+
+    prof = store.get_project_meta(pid, "profile") or store.get_project_meta(pid, "profile_draft")
+    ws = config.data_dir() / "onboarding" / pid / "sweep-workspace"
+    copy = None
+    try:
+        shutil.rmtree(ws, ignore_errors=True)
+        ws.mkdir(parents=True)
+        snapshot(prepare_repo(store.get_project(pid), fresh=True), ws)
+        system_map = scan(ws)
+        ob["status"] = "sweeping"
+        say("QA sweep: booting a fresh copy")
+        copy = Copy(ws, system_map, f"ccopy-sweep-{pid.lower()}", profile=prof)
+        copy.up()
+        ob["sweep"] = _sweep(store, pid, copy, say)
+        ob["status"] = "ready" if store.get_project_meta(pid, "profile_draft") else ob.get("status", "ready")
+        say("QA sweep finished")
+    except Exception as e:  # noqa: BLE001
+        log.error("sweep %s failed:\n%s", pid, traceback.format_exc())
+        ob["status"] = "ready"
+        say(f"QA sweep failed: {e}")
     finally:
         if copy:
             copy.down()

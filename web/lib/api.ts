@@ -2,10 +2,12 @@ import type {
   AuditResult,
   DbCheck,
   Health,
+  Onboarding,
   Project,
   Run,
   SavedTest,
   Schedule,
+  Sweep,
   SystemMap,
   Trigger,
 } from "./types";
@@ -116,6 +118,12 @@ export const api = {
     MOCK ? mock((m) => m.approveShip(rid, who)) : req("POST", `/runs/${enc(rid)}/approve-ship`, { who }),
   audit: (rid: string): Promise<AuditResult> =>
     MOCK ? mock((m) => m.audit(rid)) : req("GET", `/runs/${enc(rid)}/audit`),
+
+  onboarding: (pid: string): Promise<Onboarding> => req("GET", `/projects/${enc(pid)}/onboarding`),
+  startOnboarding: (pid: string): Promise<Onboarding> => req("POST", `/projects/${enc(pid)}/onboard`),
+  approveProfile: (pid: string, who: string): Promise<Onboarding> => req("POST", `/projects/${enc(pid)}/profile/approve`, { who }),
+  startSweep: (pid: string): Promise<Onboarding> => req("POST", `/projects/${enc(pid)}/sweep`),
+  sweep: (pid: string): Promise<Sweep> => req("GET", `/projects/${enc(pid)}/sweep`),
 
   getSchedule: (pid: string): Promise<Schedule> =>
     MOCK ? mock((m) => m.getSchedule(pid)) : req("GET", `/projects/${enc(pid)}/schedule`),

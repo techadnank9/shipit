@@ -78,6 +78,7 @@ export default function ProjectView() {
             </div>
           </div>
           <div className="col-side">
+            <OnboardingCard pid={id} />
             <div className="area-map">
               <MapSummary pid={id} />
             </div>
@@ -88,6 +89,42 @@ export default function ProjectView() {
         </div>
       )}
     </>
+  );
+}
+
+function OnboardingCard({ pid }: { pid: string }) {
+  const { data } = useLoad(() => api.onboarding(pid), [pid]);
+  if (!data) return null;
+  const st = data.onboarding.status;
+  const approved = !!data.profile;
+  const t = data.onboarding.sweep;
+  const label = approved ? "Approved" : st === "ready" ? "Waiting for approval" : st === "not_started" ? "Not onboarded" : st === "failed" ? "Failed" : "In progress";
+  const tone = approved ? "pass" : st === "failed" ? "fail" : st === "ready" || st === "not_started" ? "gate" : "run";
+  return (
+    <Panel
+      title="Onboarding"
+      id="onboarding"
+      tone={approved ? undefined : "gate"}
+      actions={
+        <Link className="btn btn-small" href={`/onboard?id=${encodeURIComponent(pid)}`}>
+          {approved ? "View" : st === "not_started" ? "Start" : "Open"}
+        </Link>
+      }
+    >
+      <p className="row-gap small">
+        <span className={`pill pill-${tone}`}>
+          <span className="pill-mark" aria-hidden="true" />
+          {label}
+        </span>
+        {data.approved_by && <span className="muted">by {data.approved_by.who}</span>}
+      </p>
+      {t && (
+        <p className="small muted">
+          Last page sweep: {t.pages} pages, {t.issues.high} high issues, {t.tests_passed}/{t.tests} tests passed.
+        </p>
+      )}
+      {!approved && <p className="small muted">Onboard once so every copy of this system boots the same way.</p>}
+    </Panel>
   );
 }
 
@@ -118,7 +155,7 @@ function RequestChange({ pid }: { pid: string }) {
     <Panel
       title="Request a change"
       id="change"
-      sub="Claude writes requirements for your approval, changes the code on a copy, and waits for your ship approval."
+      sub="Carbon Copy writes requirements for your approval, changes the code on a copy, and waits for your ship approval."
     >
       <form className="form" onSubmit={submit}>
         <div className="field">

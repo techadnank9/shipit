@@ -29,7 +29,8 @@ PLAN = {"type": "object", "additionalProperties": False, "required": ["steps"], 
 
 SYSTEM = """You turn a plain-English QA instruction into browser steps for Playwright.
 Use only the actions in the schema. Targets must match visible button text or input aria-labels in the
-page HTML you are given. Always start with goto "/". After each important action add an ASSERT step."""
+page HTML you are given. Always start with goto to the page the instruction names ("/" if it names none).
+After each important action add an ASSERT step."""
 
 
 def plan(instructions: str, page_html: str) -> list[dict]:
@@ -52,7 +53,7 @@ def _do(page: Page, base: str, s: dict) -> None:
     a, t, v = s["action"], s["target"], s["value"]
     if a == "goto":
         page.goto(base + (t if t.startswith("/") else "/" + t))
-        page.wait_for_load_state("networkidle")
+        settle(page)
     elif a in ("click", "double_click"):
         loc = page.get_by_role("button", name=t)
         if loc.count() == 0:
@@ -84,40 +85,54 @@ def db_check(inv: dict, db_url: str = DB_URL_HOST) -> dict:
         return {"description": inv["description"], "sql": inv["sql"], "expect": inv["expect"], "got": f"error: {e}", "passed": False}
 
 
+def settle(page: Page, timeout: int = 15000) -> None:
+    """Wait for the page to go quiet, but never fail on apps that poll or stream forever."""
+    try:
+        page.wait_for_load_state("networkidle", timeout=timeout)
+    except Exception:  # noqa: BLE001
+        page.wait_for_load_state("load")
+
+
+def run_one(browser: Any, base_url: str, test: dict, video_dir: Path) -> dict:
+    """Plan and run one plain-English test in a fresh browser context, a screenshot per step."""
+    ctx = browser.new_context(record_video_dir=str(video_dir), viewport={"width": 1100, "height": 720})
+    page = ctx.new_page()
+    record = {"name": test["name"], "instructions": test["instructions"], "steps": [], "passed": True}
+    try:
+        page.goto(base_url + test.get("start", "/"))
+        settle(page)
+        steps = plan(test["instructions"], page.content())
+    except Exception as e:  # noqa: BLE001 - an unreadable test fails, the run continues
+        steps = []
+        record["passed"] = False
+        record["steps"].append({"kind": "ACT", "action": "plan", "target": "", "value": "", "why": "", "ok": False,
+                                "error": str(e)[:400], "ms": 0, "screenshot": base64.b64encode(page.screenshot()).decode()})
+    for s in steps:
+        t0 = time.time()
+        err = None
+        try:
+            _do(page, base_url, s)
+        except Exception as e:  # noqa: BLE001
+            err = str(e).splitlines()[0][:300]
+        shot = page.screenshot()
+        record["steps"].append({**s, "ok": err is None, "error": err, "ms": int((time.time() - t0) * 1000),
+                                "screenshot": base64.b64encode(shot).decode()})
+        if err:
+            record["passed"] = False
+            break
+    video = page.video.path() if page.video else None
+    ctx.close()
+    record["video"] = str(video) if video else None
+    return record
+
+
 def run(base_url: str, tests: list[dict], invariants: list[dict], out_dir: Path, on_event=None, db_url: str = DB_URL_HOST) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     results = []
     with sync_playwright() as pw:
         browser = pw.chromium.launch()
         for n, test in enumerate(tests):
-            ctx = browser.new_context(record_video_dir=str(out_dir / f"video-{n}"), viewport={"width": 1100, "height": 720})
-            page = ctx.new_page()
-            page.goto(base_url + "/")
-            page.wait_for_load_state("networkidle")
-            record = {"name": test["name"], "instructions": test["instructions"], "steps": [], "passed": True}
-            try:
-                steps = plan(test["instructions"], page.content())
-            except Exception as e:  # noqa: BLE001 - an unreadable test fails, the run continues
-                steps = []
-                record["passed"] = False
-                record["steps"].append({"kind": "ACT", "action": "plan", "target": "", "value": "", "why": "", "ok": False,
-                                        "error": str(e)[:400], "ms": 0, "screenshot": base64.b64encode(page.screenshot()).decode()})
-            for i, s in enumerate(steps):
-                t0 = time.time()
-                err = None
-                try:
-                    _do(page, base_url, s)
-                except Exception as e:  # noqa: BLE001
-                    err = str(e).splitlines()[0][:300]
-                shot = page.screenshot()
-                record["steps"].append({**s, "ok": err is None, "error": err, "ms": int((time.time() - t0) * 1000),
-                                        "screenshot": base64.b64encode(shot).decode()})
-                if err:
-                    record["passed"] = False
-                    break
-            video = page.video.path() if page.video else None
-            ctx.close()
-            record["video"] = str(video) if video else None
+            record = run_one(browser, base_url, test, out_dir / f"video-{n}")
             results.append(record)
             if on_event:
                 on_event("browser", {"test": record["name"], "passed": record["passed"]})
