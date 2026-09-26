@@ -74,9 +74,9 @@ def _do(page: Page, base: str, s: dict) -> None:
         page.wait_for_timeout(int(float(v or 1) * 1000))
 
 
-def db_check(inv: dict) -> dict:
+def db_check(inv: dict, db_url: str = DB_URL_HOST) -> dict:
     try:
-        with psycopg.connect(DB_URL_HOST, autocommit=True) as c:
+        with psycopg.connect(db_url, autocommit=True) as c:
             row = c.execute(inv["sql"]).fetchone()
         got = "" if row is None else str(row[0])
         return {"description": inv["description"], "sql": inv["sql"], "expect": inv["expect"], "got": got, "passed": got == str(inv["expect"])}
@@ -84,7 +84,7 @@ def db_check(inv: dict) -> dict:
         return {"description": inv["description"], "sql": inv["sql"], "expect": inv["expect"], "got": f"error: {e}", "passed": False}
 
 
-def run(base_url: str, tests: list[dict], invariants: list[dict], out_dir: Path, on_event=None) -> dict:
+def run(base_url: str, tests: list[dict], invariants: list[dict], out_dir: Path, on_event=None, db_url: str = DB_URL_HOST) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     results = []
     with sync_playwright() as pw:
@@ -122,7 +122,7 @@ def run(base_url: str, tests: list[dict], invariants: list[dict], out_dir: Path,
             if on_event:
                 on_event("browser", {"test": record["name"], "passed": record["passed"]})
         browser.close()
-    db = [db_check(i) for i in invariants]
+    db = [db_check(i, db_url) for i in invariants]
     return {"tests": results, "db_checks": db, "passed": all(r["passed"] for r in results) and all(d["passed"] for d in db)}
 
 

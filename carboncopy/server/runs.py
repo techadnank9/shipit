@@ -130,7 +130,7 @@ def start_change_run(store: Store, pid: str, request: str, trigger: str = "manua
     p = _project(store, pid)
     eng = engine()
     holder: dict[str, str] = {}
-    run = eng.ChangeRun.create(_repo(p, ref), request, config.runs_dir(), emit=make_emit(store, holder))
+    run = eng.ChangeRun.create(_repo(p, ref), request, config.runs_dir(), emit=make_emit(store, holder), profile=store.get_project_meta(pid, "profile"))
     title = " ".join(request.split())
     row = _register(store, run, holder, pid, "change", trigger, title if len(title) <= 80 else title[:79] + "…")
     if ref:
@@ -156,6 +156,7 @@ def start_test_run(store: Store, pid: str, trigger: str = "manual", test_ids: li
         config.runs_dir(),
         emit=make_emit(store, holder),
         title=title,
+        profile=store.get_project_meta(pid, "profile"),
     )
     row = _register(store, run, holder, pid, "test", trigger, title)
     if ref:

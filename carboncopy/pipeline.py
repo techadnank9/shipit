@@ -15,10 +15,11 @@ from typing import Callable
 from . import agent, browser, checks, report, requirements
 from .audit import AuditLog
 from .copier import Copy
-from .reader import scan
+from .reader import _ignored, scan
 
 Emit = Callable[[str, dict], None]
 IGNORE = shutil.ignore_patterns(".ccopy", ".git", ".venv", "__pycache__", "node_modules", ".pytest_cache")
+IGNORE_PARTS = {".ccopy", ".git", ".venv", "__pycache__", "node_modules", ".pytest_cache"}
 
 
 class RunStatus(StrEnum):
@@ -40,6 +41,20 @@ class RunStatus(StrEnum):
 
 
 TERMINAL = {RunStatus.SHIPPED, RunStatus.BLOCKED, RunStatus.REJECTED, RunStatus.FAILED, RunStatus.PASSED}
+
+
+def snapshot(repo: Path, dest: Path) -> None:
+    """Copy what the customer's git sees (tracked + untracked, minus .gitignore): never their local
+    data directories or .env secrets. Falls back to a plain copy for folders that are not git repos."""
+    r = subprocess.run(["git", "ls-files", "-co", "--exclude-standard", "-z"], cwd=repo, capture_output=True, text=True)
+    if r.returncode != 0 or _ignored(repo):
+        shutil.copytree(repo, dest, ignore=IGNORE, dirs_exist_ok=True)
+        return
+    for f in filter(None, r.stdout.split("\0")):
+        src = repo / f
+        if src.is_file() and not IGNORE_PARTS.intersection(Path(f).parts):
+            (dest / f).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dest / f)
 
 
 def _new_id() -> str:
@@ -103,8 +118,8 @@ class _Run:
         repo = repo.resolve()
         run_id = _new_id()
         run_dir = (runs_dir / run_id).resolve()
-        shutil.copytree(repo, run_dir / "workspace", ignore=IGNORE)
         ws = run_dir / "workspace"
+        snapshot(repo, ws)
         git = ["git", "-c", "user.email=ccopy@local", "-c", "user.name=ccopy"]
         subprocess.run(["git", "init", "-q"], cwd=ws, check=True)
         subprocess.run(["git", "add", "-A"], cwd=ws, check=True)
@@ -128,7 +143,7 @@ class _Run:
         return klass(run_dir, state, emit)
 
     def _copy(self, system_map: dict) -> Copy:
-        return Copy(self.workspace, system_map, f"ccopy-{self.id.lower()}")
+        return Copy(self.workspace, system_map, f"ccopy-{self.id.lower()}", profile=self.state.get("profile"))
 
     def _fail(self, exc: BaseException) -> None:
         self.audit.record("run.failed", who="carboncopy", error=str(exc)[:500])
@@ -158,8 +173,8 @@ class ChangeRun(_Run):
     kind = "change"
 
     @classmethod
-    def create(cls, repo: Path, request: str, runs_dir: Path, emit: Emit | None = None) -> "ChangeRun":
-        return cls._create(repo, runs_dir, emit, request=request)
+    def create(cls, repo: Path, request: str, runs_dir: Path, emit: Emit | None = None, profile: dict | None = None) -> "ChangeRun":
+        return cls._create(repo, runs_dir, emit, request=request, profile=profile)
 
     def prepare(self) -> None:
         """Map → copy → requirements. Ends at AWAITING_REQUIREMENTS."""
@@ -212,7 +227,7 @@ class ChangeRun(_Run):
             system_map = scan(self.workspace)
             copy = self._copy(system_map)
             copy.up()
-            before = browser.run(copy.app_url, reqs["browser_tests"], reqs["db_invariants"], self.dir / "before", self._emit)
+            before = browser.run(copy.app_url, reqs["browser_tests"], reqs["db_invariants"], self.dir / "before", self._emit, db_url=copy.db_url_host)
             self._log_db(before)
             self.audit.record("baseline.tested", who="ai-tester", passed=before["passed"])
             self._set(RunStatus.AGENT_WORKING, before=before)
@@ -232,7 +247,7 @@ class ChangeRun(_Run):
             copy.map = scan(self.workspace)
             copy.rebuild_app()
             final = checks.run_all(copy, self.workspace)
-            after = browser.run(copy.app_url, reqs["browser_tests"], reqs["db_invariants"], self.dir / "after", self._emit)
+            after = browser.run(copy.app_url, reqs["browser_tests"], reqs["db_invariants"], self.dir / "after", self._emit, db_url=copy.db_url_host)
             self._log_db(after)
             passed = all(c.passed for c in final) and after["passed"]
             subprocess.run(["git", "add", "-A", "--", ".", ":(exclude).ccopy"], cwd=self.workspace, check=True)
@@ -267,8 +282,8 @@ class TestRun(_Run):
     __test__ = False  # not a pytest class
 
     @classmethod
-    def create(cls, repo: Path, tests: list[dict], db_checks: list[dict], runs_dir: Path, emit: Emit | None = None, title: str = "") -> "TestRun":
-        return cls._create(repo, runs_dir, emit, tests=tests, db_checks=db_checks, title=title or f"{len(tests)} tests")
+    def create(cls, repo: Path, tests: list[dict], db_checks: list[dict], runs_dir: Path, emit: Emit | None = None, title: str = "", profile: dict | None = None) -> "TestRun":
+        return cls._create(repo, runs_dir, emit, tests=tests, db_checks=db_checks, title=title or f"{len(tests)} tests", profile=profile)
 
     def execute(self) -> None:
         copy = None
@@ -280,7 +295,7 @@ class TestRun(_Run):
             copy.up()
             fid = copy.fidelity()
             self._set(RunStatus.TESTING, fidelity=fid)
-            res = browser.run(copy.app_url, self.state["tests"], self.state["db_checks"], self.dir / "after", self._emit)
+            res = browser.run(copy.app_url, self.state["tests"], self.state["db_checks"], self.dir / "after", self._emit, db_url=copy.db_url_host)
             self._log_db(res)
             self.audit.record("tests.run", who="ai-tester", passed=res["passed"], tests=len(res["tests"]))
             self._set(RunStatus.PASSED if res["passed"] else RunStatus.FAILED, after=res)

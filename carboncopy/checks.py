@@ -28,7 +28,7 @@ class Check:
 def tests_on_copy(copy: Copy) -> Check:
     ok, out = copy.run_tests()
     tail = [l for l in out.splitlines() if l.strip()][-25:]
-    summary = next((l for l in reversed(tail) if "passed" in l or "failed" in l or "error" in l), "no test output")
+    summary = next((l for l in reversed(tail) if "passed" in l or "failed" in l or "error" in l or "advisory" in l), "no test output")
     return Check("Tests on the copy", ok, summary.strip(" ="), tail)
 
 

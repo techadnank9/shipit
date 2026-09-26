@@ -1,5 +1,6 @@
 """Reader: turns a repo into a system map (code structure + infrastructure + database)."""
-import json
+import re
+import subprocess
 from pathlib import Path
 
 import hcl2
@@ -7,12 +8,26 @@ import tree_sitter_python as tspython
 from tree_sitter import Language, Parser
 
 PY = Language(tspython.language())
-SKIP = {".git", ".venv", "node_modules", "__pycache__", ".ccopy"}
+SKIP = {".git", ".venv", "node_modules", "__pycache__", ".ccopy", ".next", "dist", "build"}
+JS_SUFFIXES = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
 
 
-def _files(root: Path, suffix: str):
-    for p in root.rglob(f"*{suffix}"):
-        if not SKIP.intersection(p.relative_to(root).parts):
+def _ignored(root: Path) -> bool:
+    """True when root sits inside another repo's ignored folder (e.g. Carbon Copy's own data dir)."""
+    return subprocess.run(["git", "check-ignore", "-q", "."], cwd=root, capture_output=True).returncode == 0
+
+
+def _listing(root: Path) -> list[Path]:
+    """Files the customer actually has: tracked plus untracked, minus .gitignore (local data, secrets)."""
+    r = subprocess.run(["git", "ls-files", "-co", "--exclude-standard", "-z"], cwd=root, capture_output=True, text=True)
+    if r.returncode == 0 and not _ignored(root):
+        return [root / f for f in r.stdout.split("\0") if f and not SKIP.intersection(Path(f).parts)]
+    return [p for p in root.rglob("*") if p.is_file() and not SKIP.intersection(p.relative_to(root).parts)]
+
+
+def _files(root: Path, *suffixes: str):
+    for p in _listing(root):
+        if p.suffix in suffixes and p.is_file():
             yield p
 
 
@@ -63,6 +78,51 @@ def _python_symbols(path: Path, root: Path) -> dict:
     }
 
 
+STRING = re.compile(r"`[^`]*`|\"[^\"\n]*\"|'[^'\n]*'", re.S)
+SQL_TABLE = re.compile(r"\b(?:from|into|update|join)\s+([a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)?)", re.I)
+CTE = re.compile(r"\b([a-z_][a-z0-9_]*)\s+as\s*\(", re.I)
+DDL_TABLE = re.compile(r"create\s+(?:temp(?:orary)?\s+)?(?:table|materialized\s+view|view)\s+(?:if\s+not\s+exists\s+)?([a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)?)", re.I)
+JS_ENV = re.compile(r"process\.env(?:\.([A-Z_][A-Z0-9_]*)|\[[\"']([A-Z_][A-Z0-9_]*)[\"']\])")
+JS_FUNC = re.compile(r"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+(\w+)", re.M)
+JS_METHOD = re.compile(r"export\s+(?:async\s+)?(?:function|const)\s+(GET|POST|PUT|PATCH|DELETE)\b")
+
+
+def _next_path(rel: Path) -> str | None:
+    """Next.js route for app/**/route.ts or app/**/page.tsx; None for other files."""
+    parts = rel.parts
+    if "app" not in parts:
+        return None
+    segs = [p for p in parts[parts.index("app") + 1 : -1] if not (p.startswith("(") and p.endswith(")"))]
+    return "/" + "/".join(":" + p.strip("[].") if p.startswith("[") else p for p in segs)
+
+
+def _js_symbols(path: Path, root: Path) -> dict:
+    src = path.read_text(errors="replace")
+    rel = path.relative_to(root)
+    functions = [{"name": m[1], "line": src.count("\n", 0, m.start()) + 1} for m in JS_FUNC.finditer(src)]
+    routes = []
+    if (route := _next_path(rel)) is not None:
+        if rel.stem == "route":
+            routes = [{"method": m, "path": route, "handler": m} for m in dict.fromkeys(JS_METHOD.findall(src))]
+        elif rel.stem == "page":
+            routes = [{"method": "PAGE", "path": route, "handler": "page"}]
+    tables = set()
+    for lit in STRING.findall(src):
+        ctes = {c.lower() for c in CTE.findall(lit)}
+        tables |= {t.lower() for t in SQL_TABLE.findall(lit)} - ctes
+    env = {a or b for a, b in JS_ENV.findall(src)}
+    return {"file": str(rel), "functions": functions, "routes": routes, "sql_tables": sorted(tables), "env_vars": sorted(env)}
+
+
+def _sql_kind(path: Path) -> dict:
+    """Which engine a .sql file targets and whether it changes schema/data or is a saved query."""
+    text = path.read_text(errors="replace")
+    body = re.sub(r"--[^\n]*", "", text).lower()
+    engine = "clickhouse" if ("clickhouse" in path.name.lower() or re.search(r"engine\s*=\s*\w*mergetree|materialized view", body)) else "postgres"
+    kind = "schema" if re.search(r"\b(create|alter|insert|drop|truncate)\b", body) else "query"
+    return {"engine": engine, "kind": kind}
+
+
 def _unquote(v):
     if isinstance(v, str) and len(v) >= 2 and v[0] == v[-1] == '"':
         return v[1:-1]
@@ -86,25 +146,36 @@ def _terraform(root: Path) -> list[dict]:
     return resources
 
 
-def _schema(root: Path) -> list[str]:
-    return [str(p.relative_to(root)) for p in _files(root, ".sql")]
+def _schema(root: Path) -> dict[str, dict]:
+    files = {str(p.relative_to(root)): p for p in sorted(_files(root, ".sql"))}
+    out = {f: _sql_kind(p) for f, p in files.items()}
+    ch_tables = {t.lower() for f, p in files.items() if out[f]["engine"] == "clickhouse" for t in DDL_TABLE.findall(p.read_text(errors="replace"))}
+    for f, p in files.items():  # a saved query that reads a ClickHouse table runs on ClickHouse
+        if out[f]["kind"] == "query" and ch_tables & {t.lower() for t in SQL_TABLE.findall(p.read_text(errors="replace"))}:
+            out[f]["engine"] = "clickhouse"
+    return out
+
+
+def _ddl_tables(root: Path, schema: dict[str, dict]) -> set[str]:
+    return {t.lower() for f, k in schema.items() if k["kind"] == "schema" for t in DDL_TABLE.findall((root / f).read_text(errors="replace"))}
 
 
 def scan(root: Path) -> dict:
     root = root.resolve()
-    code = [_python_symbols(p, root) for p in _files(root, ".py")]
-    system_map = {
+    code = [_python_symbols(p, root) for p in _files(root, ".py")] + [_js_symbols(p, root) for p in _files(root, *JS_SUFFIXES)]
+    schema = _schema(root)
+    ddl = _ddl_tables(root, schema)
+    return {
         "repo": root.name,
         "code": code,
         "routes": [r | {"file": c["file"]} for c in code for r in c["routes"]],
-        "tables": sorted({t for c in code for t in c["sql_tables"]}),
+        # Tables the code touches; when the repo ships DDL, only names it defines (drops prose and CTEs).
+        "tables": sorted({t for c in code for t in c["sql_tables"] if not ddl or t in ddl or t.split(".")[-1] in ddl}),
         "env_vars": sorted({e for c in code for e in c["env_vars"]}),
         "infrastructure": (infra := _terraform(root)),
-        "schema_files": _schema(root),
+        "schema_files": list(schema),
+        "sql": schema,
         "has_dockerfile": (root / "Dockerfile").exists(),
+        "has_package_json": (root / "package.json").exists(),
         "aws_services": sorted({r["type"].split("_")[1] for r in infra if r["type"].startswith("aws_")}),
     }
-    out = root / ".ccopy" / "map.json"
-    out.parent.mkdir(exist_ok=True)
-    out.write_text(json.dumps(system_map, indent=2, default=str))
-    return system_map

@@ -61,6 +61,12 @@ run_meta = sa.Table(
     sa.Column("key", sa.String(100), primary_key=True),
     sa.Column("value", sa.JSON),
 )
+project_meta = sa.Table(
+    "project_meta", md,
+    sa.Column("project_id", sa.String(32), primary_key=True),
+    sa.Column("key", sa.String(100), primary_key=True),
+    sa.Column("value", sa.JSON),
+)
 schedules = sa.Table(
     "schedules", md,
     sa.Column("project_id", sa.String(32), primary_key=True),
@@ -227,6 +233,16 @@ class Store:
 
     def get_run_meta(self, run_id: str, key: str) -> Any:
         r = self._one(sa.select(run_meta.c.value).where(run_meta.c.run_id == run_id, run_meta.c.key == key))
+        return r["value"] if r else None
+
+    def set_project_meta(self, project_id: str, key: str, value: Any) -> None:
+        with self.engine.begin() as c:
+            n = c.execute(project_meta.update().where(project_meta.c.project_id == project_id, project_meta.c.key == key).values(value=value)).rowcount
+            if not n:
+                c.execute(project_meta.insert().values(project_id=project_id, key=key, value=value))
+
+    def get_project_meta(self, project_id: str, key: str) -> Any:
+        r = self._one(sa.select(project_meta.c.value).where(project_meta.c.project_id == project_id, project_meta.c.key == key))
         return r["value"] if r else None
 
     # schedules

@@ -21,6 +21,12 @@ STEPS = {
 
 def handle_job(job: Job) -> None:
     store = get_store()
+    if job.get("type") == "project.onboard":
+        from . import onboarding
+
+        log.info("project.onboard %s", job.get("project_id"))
+        onboarding.run(store, job.get("project_id", ""))
+        return
     rid, kind = job.get("run_id", ""), job.get("type", "")
     row = store.run_row(rid)
     if not row or kind not in STEPS:

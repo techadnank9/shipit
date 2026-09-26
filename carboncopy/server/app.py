@@ -272,6 +272,54 @@ async def run_events(rid: str, request: Request) -> StreamingResponse:
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
+@app.get("/api/projects/{pid}/onboarding")
+def get_onboarding(pid: str) -> dict[str, Any]:
+    from . import onboarding
+
+    _project(pid)
+    return onboarding.state(get_store(), pid)
+
+
+@app.post("/api/projects/{pid}/onboard")
+def start_onboarding(pid: str) -> dict[str, Any]:
+    from . import onboarding
+    from .queue import enqueue
+
+    _project(pid)
+    store = get_store()
+    current = onboarding.state(store, pid)["onboarding"]
+    if current["status"] in ("drafting", "booting", "revising"):
+        raise HTTPException(409, "onboarding is already running")
+    store.set_project_meta(pid, "onboarding", {"status": "queued", "log": [], "attempts": []})
+    enqueue("project.onboard", "", project_id=pid)
+    return onboarding.state(store, pid)
+
+
+@app.post("/api/projects/{pid}/profile/approve")
+def approve_profile(pid: str, body: WhoIn) -> dict[str, Any]:
+    from . import onboarding
+
+    _project(pid)
+    try:
+        return onboarding.approve(get_store(), pid, body.who)
+    except ValueError as e:
+        raise HTTPException(409, str(e)) from e
+
+
+@app.put("/api/projects/{pid}/profile")
+def edit_profile(pid: str, body: dict[str, Any]) -> dict[str, Any]:
+    from carboncopy.profile import validate
+
+    from . import onboarding
+
+    _project(pid)
+    try:
+        get_store().set_project_meta(pid, "profile_draft", validate(body))
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return onboarding.state(get_store(), pid)
+
+
 @app.post("/api/runs/{rid}/approve-requirements")
 def approve_requirements(rid: str, body: WhoIn) -> Row:
     return runs.approve_requirements(get_store(), rid, body.who)
