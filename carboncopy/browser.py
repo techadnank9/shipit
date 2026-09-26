@@ -2,6 +2,7 @@
 then checks the copy's database behind the screen. Records video + a screenshot per step."""
 import base64
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -21,7 +22,7 @@ STEP = {
         "kind": {"type": "string", "enum": ["ACT", "ASSERT"]},
         "action": {"type": "string", "enum": ["goto", "click", "double_click", "fill", "expect_text", "expect_no_text", "wait"]},
         "target": {"type": "string", "description": "URL path for goto; visible button text or input label for click/fill; for expect_text/expect_no_text the id, data-testid or aria-label of the element to look inside, or empty for the whole page"},
-        "value": {"type": "string", "description": "text to type, or text expected on screen, or seconds to wait"},
+        "value": {"type": "string", "description": "text to type, or text expected on screen, or seconds to wait. For long repeated text write {repeat:CHARS:N}, e.g. {repeat:a:500}"},
         "why": {"type": "string"},
     },
 }
@@ -30,7 +31,7 @@ PLAN = {"type": "object", "additionalProperties": False, "required": ["steps"], 
 SYSTEM = """You turn a plain-English QA instruction into browser steps for Playwright.
 Use only the actions in the schema. Targets must match visible button text or input aria-labels in the
 page HTML you are given. Always start with goto to the page the instruction names ("/" if it names none).
-After each important action add an ASSERT step."""
+After each important action add an ASSERT step. Text checks are case-sensitive and match whole words."""
 
 
 def plan(instructions: str, page_html: str) -> list[dict]:
@@ -49,8 +50,20 @@ def _scope(page: Page, target: str) -> Any:
     return page
 
 
+REPEAT = re.compile(r"\{repeat:(.+?):(\d{1,5})\}")
+
+
+def _expand(v: str) -> str:
+    return REPEAT.sub(lambda m: m[1] * int(m[2]), v)
+
+
+def _text(v: str) -> re.Pattern:
+    """Case-sensitive, whole-word: "Send" must not match "send a message" or "Sending"."""
+    return re.compile(rf"(?<!\w){re.escape(v)}(?!\w)")
+
+
 def _do(page: Page, base: str, s: dict) -> None:
-    a, t, v = s["action"], s["target"], s["value"]
+    a, t, v = s["action"], s["target"], _expand(s["value"])
     if a == "goto":
         page.goto(base + (t if t.startswith("/") else "/" + t))
         settle(page)
@@ -66,10 +79,10 @@ def _do(page: Page, base: str, s: dict) -> None:
             loc = page.get_by_placeholder(t)
         loc.first.fill(v, timeout=5000)
     elif a == "expect_text":
-        _scope(page, t).get_by_text(v, exact=False).first.wait_for(state="visible", timeout=5000)
+        _scope(page, t).get_by_text(_text(v)).first.wait_for(state="visible", timeout=5000)
     elif a == "expect_no_text":
         page.wait_for_timeout(500)
-        if _scope(page, t).get_by_text(v, exact=False).count() > 0:
+        if any(el.is_visible() for el in _scope(page, t).get_by_text(_text(v)).all()):
             raise AssertionError(f"'{v}' is on the screen{f' in {t}' if t else ''} but should not be")
     elif a == "wait":
         page.wait_for_timeout(int(float(v or 1) * 1000))
@@ -106,14 +119,14 @@ def run_one(browser: Any, base_url: str, test: dict, video_dir: Path) -> dict:
         steps = []
         record["passed"] = False
         record["steps"].append({"kind": "ACT", "action": "plan", "target": "", "value": "", "why": "", "ok": False,
-                                "error": str(e)[:400], "ms": 0, "screenshot": base64.b64encode(page.screenshot()).decode()})
+                                "error": f"{type(e).__name__}: {e}"[:400], "ms": 0, "screenshot": base64.b64encode(page.screenshot()).decode()})
     for s in steps:
         t0 = time.time()
         err = None
         try:
             _do(page, base_url, s)
         except Exception as e:  # noqa: BLE001
-            err = str(e).splitlines()[0][:300]
+            err = (str(e).splitlines() or [type(e).__name__])[0][:300]
         shot = page.screenshot()
         record["steps"].append({**s, "ok": err is None, "error": err, "ms": int((time.time() - t0) * 1000),
                                 "screenshot": base64.b64encode(shot).decode()})

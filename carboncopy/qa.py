@@ -61,7 +61,10 @@ or engineer would care about: errors in the console or failed requests, raw erro
 "NaN" or "null" on screen, broken or empty sections that should have content, controls that cannot work.
 Do not report style opinions. Then write up to 3 plain-English tests of the main things a user does on
 this page. Each test starts with "Open <path>.", describes the actions with visible labels, and ends with
-"Expected: ..." naming what must be visible. This is a disposable copy: tests may create data."""
+"Expected: ..." naming what must be visible. Each test runs alone in a fresh browser (no cookies or local
+storage): if the page needs a signed-in user, the test signs up or signs in through the UI first. The tester
+can only open pages, click, type, wait, and check visible text. This is a disposable copy: tests may
+create data."""
 
 JS_CONTROLS = """() => {
   const label = el => (el.getAttribute('aria-label') || el.innerText || el.getAttribute('placeholder') || el.name || '').trim().slice(0, 60);

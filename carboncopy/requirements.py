@@ -40,8 +40,13 @@ SYSTEM = """You are the requirements architect inside Carbon Copy, a system that
 working copy of production. Turn a business request into precise, testable requirements.
 Rules:
 - Every acceptance criterion must be checkable by an automated test.
-- browser_tests: plain-English instructions a human QA tester could follow on the app's web page,
-  starting from "/". Mention exact button labels you can see in the code. Include the expected outcome.
+- browser_tests: plain-English instructions a human QA tester could follow in the app's web pages.
+  Every test runs alone in a fresh browser (no cookies, no local storage, nothing from other tests): if
+  it needs a signed-in user or existing data, the test creates them itself through the UI first.
+  The tester can only open pages, click, type (including long text), wait, and check what text is or is
+  not visible. No devtools, network interception, API calls or reading attributes: put those checks in
+  acceptance criteria or db_invariants instead. Mention exact labels you can see in the code and the
+  expected visible outcome.
 - db_invariants: SQL that returns ONE value, plus the exact expected value as a string, checked after the
   browser tests run on freshly seeded data. Only use tables and columns that exist.
 - infra_changes: include fixes for every listed policy violation.

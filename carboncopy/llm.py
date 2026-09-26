@@ -12,7 +12,7 @@ from typing import Any
 from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, ResultMessage, TextBlock, query
 
 MODEL = os.environ.get("CCOPY_MODEL", "claude-sonnet-5")
-ASK_TIMEOUT_S = float(os.environ.get("CCOPY_ASK_TIMEOUT_S", "180"))
+ASK_TIMEOUT_S = float(os.environ.get("CCOPY_ASK_TIMEOUT_S", "300"))
 
 
 def ai_mode() -> str:
