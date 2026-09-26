@@ -20,15 +20,21 @@ def ai_mode() -> str:
     return os.environ.get("CCOPY_AI", "standin").lower()
 
 
-def ask_json(prompt: str, schema: dict[str, Any], system: str, budget_usd: float = 1.0) -> dict:
-    """Single model call that must return JSON matching `schema`."""
+def ask_json(prompt: str, schema: dict[str, Any], system: str, budget_usd: float = 1.0, image: str | None = None) -> dict:
+    """Single model call that must return JSON matching `schema`. With `image`, the model may read
+    that one file (a screenshot) before answering; it gets no other tools."""
+    if image:
+        prompt = f"First look at the screenshot {image} with the Read tool.\n\n{prompt}"
 
     async def run() -> dict:
         options = ClaudeAgentOptions(
             system_prompt=system,
             model=MODEL,
-            tools=[],
-            max_turns=2,
+            tools=["Read"] if image else [],
+            allowed_tools=[f"Read({image})"] if image else [],
+            disallowed_tools=["Bash", "Write", "Edit", "WebFetch", "WebSearch", "Glob", "Grep"],
+            cwd=os.path.dirname(image) if image else None,
+            max_turns=4 if image else 2,
             max_budget_usd=budget_usd,
             setting_sources=[],  # never load the host's personal settings, plugins or hooks
             output_format={"type": "json_schema", "schema": schema},

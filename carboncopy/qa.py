@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlparse
@@ -21,6 +22,7 @@ from .browser import run_one, settle
 from .llm import ai_mode, ask_json
 
 MAX_PAGES = 40
+WORKERS = 3  # pages tested at once, each in its own browser
 PER_ROUTE = 2  # concrete examples per parameterised route
 
 REVIEW = {
@@ -58,7 +60,9 @@ REVIEW = {
 SYSTEM = """You are a senior manual QA tester going through a web app page by page. For the page you are
 given (its visible text, its controls, and what the browser recorded), report only real problems a user
 or engineer would care about: errors in the console or failed requests, raw error text, "undefined",
-"NaN" or "null" on screen, broken or empty sections that should have content, controls that cannot work.
+"NaN" or "null" on screen, broken or empty sections that should have content, controls that cannot work,
+and visual defects you can see in the screenshot (text cut off or overflowing its box, overlapping
+elements, broken images, unreadable contrast).
 Do not report style opinions. Then write up to 3 plain-English tests of the main things a user does on
 this page. Each test starts with "Open <path>.", describes the actions with visible labels, and ends with
 "Expected: ..." naming what must be visible. Each test runs alone in a fresh browser (no cookies or local
@@ -121,7 +125,7 @@ def _inspect(browser: Any, base_url: str, path: str) -> dict:
     return obs
 
 
-def _review(obs: dict) -> dict:
+def _review(obs: dict, shot: Path | None = None) -> dict:
     if ai_mode() == "standin":
         issues = [{"severity": "high", "title": "Page failed to load", "detail": str(obs["status"])}] if not isinstance(obs["status"], int) or obs["status"] >= 500 else []
         issues += [{"severity": "medium", "title": "Console error", "detail": e} for e in obs["console_errors"] + obs["page_errors"]]
@@ -130,45 +134,72 @@ def _review(obs: dict) -> dict:
     facts = {k: obs[k] for k in ("path", "final_path", "status", "console_errors", "page_errors", "failed_requests")}
     prompt = (f"PAGE: {obs['path']}\nBROWSER RECORDED: {facts}\nCONTROLS: {obs['controls'] | {'links': obs['controls']['links'][:40]}}\n\n"
               f"VISIBLE TEXT:\n{obs['text']}")
-    return ask_json(prompt, REVIEW, SYSTEM, budget_usd=0.5)
+    return ask_json(prompt, REVIEW, SYSTEM, budget_usd=0.5, image=str(shot) if shot else None)
 
 
-def sweep(base_url: str, routes: list[dict], out_dir: Path, on_event=None, run_tests: bool = True, max_pages: int = MAX_PAGES) -> dict:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    queue = _static_pages(routes)
-    param_routes = {r["path"]: _pattern(r["path"]) for r in routes if r["method"] in ("PAGE", "GET") and ":" in r["path"] and not r["path"].startswith("/api")}
-    examples: dict[str, int] = {}
-    seen, pages = set(), []
-    origin = urlparse(base_url).netloc
+def _page(base_url: str, path: str, out_dir: Path, run_tests: bool) -> dict:
+    """One page, start to finish, in its own browser (Playwright's sync API is per thread)."""
     with sync_playwright() as pw:
         browser = pw.chromium.launch()
-        while queue and len(pages) < max_pages:
-            path = queue.pop(0)
-            if path in seen:
-                continue
-            seen.add(path)
+        try:
             obs = _inspect(browser, base_url, path)
-            for href in obs["controls"]["links"]:  # crawl: real URLs for /people/:id and friends
-                u = urlparse(urljoin(base_url + path, href))
-                if u.netloc != origin or u.path in seen or u.path.startswith("/api"):
-                    continue
-                for route, rx in param_routes.items():
-                    if rx.match(u.path) and examples.get(route, 0) < PER_ROUTE:
-                        examples[route] = examples.get(route, 0) + 1
-                        queue.append(u.path)
+            slug = re.sub(r"[^A-Za-z0-9]+", "-", path).strip("-") or "root"
+            shot = None
+            if obs["screenshot"]:
+                shot = (out_dir / f"shot-{slug}.jpg").resolve()
+                shot.write_bytes(base64.b64decode(obs["screenshot"]))
             try:
-                review = _review(obs)
+                review = _review(obs, shot)
             except Exception as e:  # noqa: BLE001 - a failed review is reported, the sweep continues
                 review = {"summary": "", "issues": [{"severity": "low", "title": "Review failed", "detail": str(e)[:300]}], "tests": []}
-            record = {**{k: v for k, v in obs.items() if k != "controls"}, **review, "results": []}
+            record = {**{k: v for k, v in obs.items() if k != "controls"}, **review, "results": [], "_links": obs["controls"]["links"]}
             if run_tests:
                 for n, t in enumerate(review["tests"]):
-                    record["results"].append(run_one(browser, base_url, {**t, "start": path}, out_dir / f"video-{len(pages)}-{n}"))
-            pages.append(record)
-            if on_event:
-                on_event("page", {"path": path, "issues": len(review["issues"]),
-                                  "tests": [r["passed"] for r in record["results"]]})
-        browser.close()
+                    record["results"].append(run_one(browser, base_url, {**t, "start": path}, out_dir / f"video-{slug}-{n}"))
+            return record
+        finally:
+            browser.close()
+
+
+def sweep(base_url: str, routes: list[dict], out_dir: Path, on_event=None, run_tests: bool = True,
+          max_pages: int = MAX_PAGES, workers: int = WORKERS) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    param_routes = {r["path"]: _pattern(r["path"]) for r in routes if r["method"] in ("PAGE", "GET") and ":" in r["path"] and not r["path"].startswith("/api")}
+    origin = urlparse(base_url).netloc
+    pages: list[dict] = []
+
+    def wave(paths: list[str]) -> None:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_page, base_url, p, out_dir, run_tests): p for p in paths}
+            for f in as_completed(futures):
+                try:
+                    rec = f.result()
+                except Exception as e:  # noqa: BLE001 - one broken page never stops the sweep
+                    rec = {"path": futures[f], "final_path": futures[f], "status": f"error: {e}"[:200], "ms": 0,
+                           "console_errors": [], "page_errors": [], "failed_requests": [], "screenshot": "", "summary": "",
+                           "issues": [{"severity": "high", "title": "Page could not be tested", "detail": str(e)[:300]}],
+                           "tests": [], "results": [], "_links": []}
+                pages.append(rec)
+                if on_event:
+                    on_event("page", {"path": rec["path"], "issues": len(rec["issues"]), "tests": [r["passed"] for r in rec["results"]]})
+
+    # Wave 1: every page the code declares. Wave 2: real examples of /people/:id-style pages found in their links.
+    wave(_static_pages(routes)[:max_pages])
+    examples: dict[str, list[str]] = {}
+    seen = {p["path"] for p in pages}
+    for rec in list(pages):
+        for href in rec["_links"]:
+            u = urlparse(urljoin(base_url + rec["path"], href))
+            if u.netloc != origin or u.path in seen:
+                continue
+            for route, rx in param_routes.items():
+                if rx.match(u.path) and len(examples.setdefault(route, [])) < PER_ROUTE:
+                    examples[route].append(u.path)
+                    seen.add(u.path)
+    wave([p for ps in examples.values() for p in ps][: max(0, max_pages - len(pages))])
+    for p in pages:
+        p.pop("_links", None)
+    pages.sort(key=lambda p: p["path"])
     issues = [i for p in pages for i in p["issues"]]
     results = [r for p in pages for r in p["results"]]
     return {
