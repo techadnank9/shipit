@@ -63,7 +63,7 @@ RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev
 # ---------------------------------------------------------------- runtime
 FROM ${PYTHON_IMAGE}
 LABEL org.opencontainers.image.title="carboncopy-worker" \
-      org.opencontainers.image.source="https://github.com/techadnank9/carboncopy"
+      org.opencontainers.image.source="https://github.com/techadnank9/shipit"
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl git openssh-client \
@@ -99,6 +99,9 @@ COPY --chmod=0755 docker/bootstrap.py /usr/local/bin/ccopy-bootstrap
 
 # Non-root; talks to the host daemon via the socket (add the host's docker GID at run time
 # with --group-add). HOME must be writable: Claude Code keeps session state there.
+# The base image's pip is never used at runtime (uv builds /app/.venv); its vendored
+# msgpack/setuptools only add CVEs.
+RUN rm -rf /usr/local/lib/python3.13/site-packages/pip /usr/local/lib/python3.13/site-packages/pip-* /usr/local/bin/pip*
 RUN useradd --uid 10001 --user-group --create-home --shell /usr/sbin/nologin ccopy \
     && install -d -o 10001 -g 10001 /var/lib/ccopy
 ENV HOME=/home/ccopy \

@@ -98,7 +98,8 @@ jobs:
       - name: checkov (infra + Dockerfiles)
         run: |
           uvx --from "checkov==${CHECKOV_VERSION}" checkov -d infra --quiet --compact
-          uvx --from "checkov==${CHECKOV_VERSION}" checkov --framework dockerfile -f docker/api.Dockerfile -f docker/worker.Dockerfile --quiet --compact
+          uvx --from "checkov==${CHECKOV_VERSION}" checkov --framework dockerfile -f docker/api.Dockerfile -f docker/worker.Dockerfile --quiet --compact \
+            --skip-check CKV_DOCKER_7  # base images are pinned through ARGs, which Checkov reads as untagged
 
   images:
     # Native arm64 runners (no QEMU). If unavailable for this repo, use ubuntu-24.04 + docker/setup-qemu-action.
@@ -124,6 +125,7 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: "1"
+          trivyignores: .trivyignore
           format: table
       - name: smoke (api only)
         if: matrix.image == 'api' && hashFiles('carboncopy/server/app.py') != ''

@@ -1,0 +1,3 @@
+# docker-buildx (from docker:29-cli, needed by `docker compose build`) bundles moby/go-archive
+# v0.2.0. No buildx release includes 0.3.0 yet (latest v0.37.1). Re-check on expiry.
+CVE-2026-17106 exp:2026-10-25
